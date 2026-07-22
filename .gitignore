@@ -1,0 +1,4 @@
+# Real secrets — never commit. Use .env.example as the template.
+.env
+
+.DS_Store

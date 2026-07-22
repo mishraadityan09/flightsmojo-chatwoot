@@ -55,12 +55,27 @@ app.post("/webhook", (req, res) => {
   });
 });
 
+// Lesson (learned the hard way, via a 401): the bot's token may POST replies
+// and change conversation status, but may NOT read message history. So the
+// bot keeps its own short-term memory per conversation, in RAM. A restart
+// forgets mid-conversation context — acceptable for v1; the customer's next
+// message simply starts fresh.
+const histories = new Map(); // conversationId -> [{ role, parts }]
+
+function remember(conversationId, role, text) {
+  const history = histories.get(conversationId) ?? [];
+  history.push({ role, parts: [{ text }] });
+  while (history.length > 20) history.shift(); // keep the last 10 exchanges
+  histories.set(conversationId, history);
+  return history;
+}
+
 async function handleCustomerMessage(event) {
   const conversationId = event.conversation.id;
   console.log(`[conv ${conversationId}] customer: ${event.content}`);
 
-  const history = await fetchConversationHistory(conversationId);
-  const reply = await askGemini(history);
+  const history = remember(conversationId, "user", event.content);
+  const reply = await askGemini([...history]);
   console.log(`[conv ${conversationId}] bot: ${reply}`);
 
   if (reply.trim() === "HANDOFF" || reply.includes("HANDOFF")) {
@@ -69,7 +84,9 @@ async function handleCustomerMessage(event) {
       "Let me connect you with one of our travel experts — a human teammate will be with you shortly. 🙋",
     );
     await handoffToHuman(conversationId);
+    histories.delete(conversationId); // humans own it now
   } else {
+    remember(conversationId, "model", reply);
     await postReply(conversationId, reply);
   }
 }
@@ -84,22 +101,6 @@ const chatwootHeaders = {
   "Content-Type": "application/json",
   api_access_token: CHATWOOT_BOT_TOKEN, // the bot's badge
 };
-
-/** Full thread so Gemini sees context, mapped to Gemini's role format. */
-async function fetchConversationHistory(conversationId) {
-  const res = await fetch(chatwootUrl(`/conversations/${conversationId}/messages`), {
-    headers: chatwootHeaders,
-  });
-  if (!res.ok) throw new Error(`Chatwoot history fetch failed: ${res.status}`);
-  const json = await res.json();
-
-  return (json.payload || [])
-    .filter((m) => !m.private && m.content && m.message_type <= 1)
-    .map((m) => ({
-      role: m.message_type === 0 ? "user" : "model", // 0 incoming, 1 outgoing
-      parts: [{ text: m.content }],
-    }));
-}
 
 function postReply(conversationId, content) {
   return fetch(chatwootUrl(`/conversations/${conversationId}/messages`), {

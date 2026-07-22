@@ -72,6 +72,18 @@ services:
     volumes:
       - redis_data:/data
 
+  bot:
+    # Our own AI support bot (bot/ folder) — receives Chatwoot agent-bot
+    # webhooks and replies via Gemini. See bot/server.js for the full story.
+    build: ./bot
+    env_file: .env
+    restart: always
+    depends_on:
+      - rails
+    ports:
+      # localhost-only, handy for curl debugging (rails reaches it as bot:3002)
+      - '127.0.0.1:3002:3002'
+
 volumes:
   storage_data:
   postgres_data:

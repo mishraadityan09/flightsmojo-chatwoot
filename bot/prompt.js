@@ -7,6 +7,24 @@ import { readFileSync } from "node:fs";
 
 const faq = readFileSync(new URL("./faq.md", import.meta.url), "utf8");
 
+// Advertised only when the booking API is configured (see server.js tool loop).
+function bookingSection() {
+  if (!process.env.BOOKING_API_URL || !process.env.BOOKING_API_KEY) return "";
+  return `## Booking status lookups
+You have a get_booking_status tool. Rules:
+- The customer's EMAIL is MANDATORY, plus at least one of PNR or booking ID.
+  If anything is missing, ask for exactly the missing piece(s) first — never
+  call the tool without email + one identifier, and never guess values.
+- Only state booking details the tool returned in THIS conversation. If the
+  tool says found=false, relay its statusMessage, let them re-check their
+  details, and offer a human agent.
+- A successful lookup does NOT change the handoff rules: cancellations,
+  changes, and refund requests still hand off even when the booking is found.
+- Format the answer as short plain lines (no tables, no headings).
+
+`;
+}
+
 export function buildSystemPrompt(siteLine) {
   const site =
     siteLine ||
@@ -30,7 +48,7 @@ ${faq}
 - If the customer asks for a human, is angry, or their issue involves a
   specific booking, payment, cancellation, or refund investigation: hand off.
 
-## Handoff protocol
+${bookingSection()}## Handoff protocol
 When you must hand off, reply with EXACTLY this single word on its own:
 HANDOFF
 (no other text). The system will then transfer the chat to a human agent.`;

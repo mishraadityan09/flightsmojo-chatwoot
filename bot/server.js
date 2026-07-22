@@ -130,30 +130,114 @@ function handoffToHuman(conversationId) {
   });
 }
 
-// ── Gemini API (lesson 3b + 4: stateless LLM calls) ──
-// Note: the WHOLE conversation is re-sent every time — the model remembers
-// nothing between calls. The system prompt (the briefing) rides along too.
+// ── Booking lookup tool (least-privilege bot API, X-Api-Key auth) ──
+// Verification rule: email is MANDATORY plus PNR or bookingId. Enforced in
+// three layers: tool schema, prompt rules, and the hard check below.
+
+const { BOOKING_API_URL, BOOKING_API_KEY } = process.env;
+const BOOKING_TOOL_ENABLED = Boolean(BOOKING_API_URL && BOOKING_API_KEY);
+
+const GEMINI_TOOLS = [
+  {
+    function_declarations: [
+      {
+        name: "get_booking_status",
+        description:
+          "Look up a FlightsMojo booking's status, flights, and payment state. " +
+          "Requires the customer's email AND at least one of: PNR, bookingId.",
+        parameters: {
+          type: "object",
+          properties: {
+            email: { type: "string", description: "Email used on the booking (mandatory)" },
+            pnr: { type: "string", description: "Airline PNR, e.g. M22W8V" },
+            bookingId: { type: "integer", description: "FlightsMojo booking id" },
+          },
+          required: ["email"],
+        },
+      },
+    ],
+  },
+];
+
+async function executeBookingLookup(args = {}) {
+  const email = String(args.email || "").trim();
+  const pnr = String(args.pnr || "").trim();
+  const bookingId = Number(args.bookingId) || 0;
+  if (!email || (!pnr && !bookingId)) {
+    return { error: "Missing details. Email plus a PNR or booking id are required — ask the customer for the missing piece." };
+  }
+  console.log(`booking lookup: id=${bookingId || "-"} pnr=${pnr || "-"} email=***`);
+  try {
+    const res = await fetch(BOOKING_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Api-Key": BOOKING_API_KEY },
+      body: JSON.stringify({ email, pnr: pnr || null, bookingId: bookingId || null }),
+    });
+    if (!res.ok) {
+      return { error: `Lookup failed (HTTP ${res.status}). Apologize and offer a human agent.` };
+    }
+    return await res.json();
+  } catch {
+    return { error: "Lookup service unreachable. Apologize and offer a human agent." };
+  }
+}
+
+// ── Gemini API (lesson 3b + 4: stateless LLM calls + tool loop) ──
+// The WHOLE conversation is re-sent every time — the model remembers nothing
+// between calls. When it returns a functionCall instead of text, we run the
+// tool, append the result, and call again (bounded rounds).
 
 async function askGemini(history, systemPrompt) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents: history,
-        generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
-      }),
-    },
-  );
-  if (!res.ok) {
-    throw new Error(`Gemini API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const contents = [...history];
+
+  for (let round = 0; round < 4; round++) {
+    const body = {
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
+    };
+    if (BOOKING_TOOL_ENABLED) body.tools = GEMINI_TOOLS;
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) {
+      throw new Error(`Gemini API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    }
+    const json = await res.json();
+    const content = json.candidates?.[0]?.content;
+    if (!content) throw new Error("Gemini returned no content");
+
+    const fcPart = (content.parts || []).find((p) => p.functionCall);
+    if (!fcPart) {
+      const text = (content.parts || []).map((p) => p.text || "").join("");
+      if (!text) throw new Error("Gemini returned an empty reply");
+      return text;
+    }
+
+    // Echo the model turn verbatim (keeps functionCall id + thoughtSignature
+    // intact — required by the API), then append our tool result.
+    const result = await executeBookingLookup(fcPart.functionCall.args);
+    contents.push(content);
+    contents.push({
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            name: fcPart.functionCall.name,
+            id: fcPart.functionCall.id,
+            response: result,
+          },
+        },
+      ],
+    });
   }
-  const json = await res.json();
-  const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
-  if (!text) throw new Error("Gemini returned an empty reply");
-  return text;
+  throw new Error("Tool loop exceeded max rounds");
 }
 
 app.listen(PORT, () => {

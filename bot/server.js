@@ -26,7 +26,18 @@ const {
   PORT = 3002,
 } = process.env;
 
-const SYSTEM_PROMPT = buildSystemPrompt();
+// Per-inbox site identity (multi-market): INBOX_SITES is a JSON map of
+// inbox id -> human description ("flightsmojo.ae (UAE) — prices in AED").
+// Unknown inboxes get a market-neutral prompt.
+const INBOX_SITES = JSON.parse(process.env.INBOX_SITES || "{}");
+const promptCache = new Map();
+function systemPromptFor(inboxId) {
+  const key = String(inboxId ?? "");
+  if (!promptCache.has(key)) {
+    promptCache.set(key, buildSystemPrompt(INBOX_SITES[key]));
+  }
+  return promptCache.get(key);
+}
 
 const app = express();
 app.use(express.json());
@@ -75,7 +86,7 @@ async function handleCustomerMessage(event) {
   console.log(`[conv ${conversationId}] customer: ${event.content}`);
 
   const history = remember(conversationId, "user", event.content);
-  const reply = await askGemini([...history]);
+  const reply = await askGemini([...history], systemPromptFor(event.conversation.inbox_id));
   console.log(`[conv ${conversationId}] bot: ${reply}`);
 
   if (reply.trim() === "HANDOFF" || reply.includes("HANDOFF")) {
@@ -123,14 +134,14 @@ function handoffToHuman(conversationId) {
 // Note: the WHOLE conversation is re-sent every time — the model remembers
 // nothing between calls. The system prompt (the briefing) rides along too.
 
-async function askGemini(history) {
+async function askGemini(history, systemPrompt) {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        system_instruction: { parts: [{ text: systemPrompt }] },
         contents: history,
         generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
       }),

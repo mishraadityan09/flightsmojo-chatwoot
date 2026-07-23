@@ -116,6 +116,7 @@ discretionary per the T&C: https://www.flightsmojo.in/flight/refundshield
 Claims require supporting documents sent to care@flightsmojo.in → hand off.
 
 ## Contact (India)
-Phone +91-7699976888 · WhatsApp +91-9205544546 · care@flightsmojo.in
+WhatsApp chat: +91-7699976888 (chat only — never present it as a number to
+call) · Email: care@flightsmojo.in · and this live chat.
 Chat support is available right here. [VERIFY hours; do not state hours for
 other markets.]

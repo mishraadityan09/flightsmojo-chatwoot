@@ -12,7 +12,10 @@
 
 services:
   base: &base
-    image: chatwoot/chatwoot:latest
+    # FlightsMojo-branded Chatwoot CE, built by the fork's CI
+    # (github.com/mishraadityan09/chatwoot, branch flightsmojo).
+    # Pinned tag = deliberate upgrades only; bump -fmN per fork change.
+    image: ghcr.io/mishraadityan09/chatwoot:v4.16.0-fm1
     env_file: .env
     volumes:
       # Uploaded files (avatars, attachments) persist here across restarts.

@@ -1,8 +1,15 @@
-# Idempotent provisioning for FlightsMojo support inboxes (launch sites).
+# Idempotent provisioning for the whole FlightsMojo support setup.
 # Run:  docker compose exec -T rails bundle exec rails runner - < scripts/provision.rb
-# Safe to re-run: finds-or-creates inboxes, (re)applies ticket-style settings,
-# attaches the agent bot, adds all agents. Prints "id|name|website_token" per
-# site — those tokens go into the web app env (NEXT_PUBLIC_CHATWOOT_TOKEN_*).
+#
+# Recreates from scratch on any fresh install (this is the source of truth for
+# DB state — we never copy the database between environments, we re-run this):
+#   - the "FlightsMojo Assistant" agent bot  (prints BOT_TOKEN → bot/.env CHATWOOT_BOT_TOKEN)
+#   - the booking_id conversation custom attribute (CRM/booking lookups)
+#   - 10 functional teams + 13 labels (Zendesk-migration taxonomy)
+#   - the 4 launch inboxes with ticket-style settings, bot attached
+#     (prints id|name|website_token → web app NEXT_PUBLIC_CHATWOOT_TOKEN_*)
+#   - every existing account user added to every inbox
+# Safe to re-run any time: everything is find-or-create.
 
 SITES = [
   ['FlightsMojo India', 'https://www.flightsmojo.in'],
@@ -37,7 +44,23 @@ LABELS = %w[
 ].freeze
 
 account = Account.first!
-bot = AgentBot.first!
+
+# ── Agent bot (webhook target is the bot container on the compose network) ──
+bot = AgentBot.find_or_initialize_by(account: account, name: 'FlightsMojo Assistant')
+bot.description = 'Gemini-backed FAQ bot with human handoff'
+bot.outgoing_url = 'http://bot:3002/webhook'
+bot.save!
+bot_token = (bot.access_token || AccessToken.create!(owner: bot)).token
+puts "BOT_TOKEN=#{bot_token}   # → bot/.env CHATWOOT_BOT_TOKEN, then: docker compose up -d bot"
+
+# ── Conversation custom attribute: booking_id (bot auto-stamps; CRM lookups) ──
+cad = CustomAttributeDefinition.find_or_initialize_by(
+  account: account, attribute_key: 'booking_id', attribute_model: :conversation_attribute
+)
+cad.attribute_display_name = 'Booking ID'
+cad.attribute_display_type = :text
+cad.save!
+puts 'custom attribute: booking_id ready'
 
 TEAMS.each do |name, description|
   team = Team.find_or_initialize_by(account: account, name: name)

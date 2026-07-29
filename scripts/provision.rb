@@ -6,16 +6,24 @@
 #   - the "FlightsMojo Assistant" agent bot  (prints BOT_TOKEN → bot/.env CHATWOOT_BOT_TOKEN)
 #   - the booking_id conversation custom attribute (CRM/booking lookups)
 #   - 10 functional teams + 13 labels (Zendesk-migration taxonomy)
-#   - the 4 launch inboxes with ticket-style settings, bot attached
+#   - the 5 market web-widget inboxes with ticket-style settings, bot attached
 #     (prints id|name|website_token → web app NEXT_PUBLIC_CHATWOOT_TOKEN_*)
 #   - every existing account user added to every inbox
+#   - 15 conversation folders per agent (replaces the Zendesk Views sidebar)
 # Safe to re-run any time: everything is find-or-create.
+#
+# Does NOT create WhatsApp inboxes — their credentials can't live in git, so
+# they are added through the dashboard UI per docs/whatsapp-integration.md.
+# A rebuild therefore reproduces everything except WhatsApp.
 
 SITES = [
-  ['FlightsMojo India', 'https://www.flightsmojo.in'],
-  ['FlightsMojo UAE',   'https://www.flightsmojo.ae'],
-  ['FlightsMojo USA',   'https://www.flightsmojo.com'],
-  ['FlightsMojo UK',    'https://www.flightsmojo.co.uk'],
+  ['FlightsMojo India',     'https://www.flightsmojo.in'],
+  ['FlightsMojo UAE',       'https://www.flightsmojo.ae'],
+  ['FlightsMojo USA',       'https://www.flightsmojo.com'],
+  ['FlightsMojo UK',        'https://www.flightsmojo.co.uk'],
+  # Fifth market added 2026-07-29 — already has a live WhatsApp line
+  # (+62 855-7480-0128) and a live site quoting IDR.
+  ['FlightsMojo Indonesia', 'https://flightsmojo.id']
 ].freeze
 
 WIDGET_COLOR = '#ef6614'.freeze # single brand orange (see web repo design system)

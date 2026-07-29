@@ -43,6 +43,21 @@ LABELS = %w[
   legal escalation tripshield b2b payment-issue bot-handled
 ].freeze
 
+UNSOLVED = %w[open pending].freeze
+
+# Chatwoot "folders" (saved filters) replacing the Zendesk Views sidebar.
+# NOTE: CustomFilter belongs_to :user — unlike Zendesk's shared, admin-defined
+# Views, folders are PER AGENT. So we create the same set for every user, and
+# re-run this whenever an agent joins.
+def filter_query(*clauses)
+  payload = clauses.each_with_index.map do |(key, op, values), i|
+    { 'attribute_key' => key, 'filter_operator' => op, 'values' => values,
+      'query_operator' => (i == clauses.size - 1 ? nil : 'and'),
+      'attribute_model' => 'standard' }
+  end
+  { 'payload' => payload }
+end
+
 account = Account.first!
 
 # ── Agent bot (webhook target is the bot container on the compose network) ──
@@ -63,7 +78,10 @@ cad.save!
 puts 'custom attribute: booking_id ready'
 
 TEAMS.each do |name, description|
-  team = Team.find_or_initialize_by(account: account, name: name)
+  # Team downcases its name in a before_validation hook, so look up by the
+  # stored (downcased) form — matching on the title-case constant always misses
+  # and then trips the uniqueness validation on re-run.
+  team = Team.find_or_initialize_by(account: account, name: name.downcase)
   team.description = description
   team.allow_auto_assign = true
   team.save!
@@ -105,4 +123,38 @@ SITES.each do |name, url|
   account.users.each { |u| InboxMember.find_or_create_by!(inbox: inbox, user: u) }
 
   puts "#{inbox.id}|#{name}|#{inbox.channel.website_token}"
+end
+
+# ── Folders (saved filters), mirroring the Zendesk Views sidebar ──
+# Zendesk views with no Chatwoot equivalent are intentionally absent:
+# "GMB Reviews" (no Google-reviews channel), the regional "Email Support X"
+# views (no per-region email inboxes yet), and Suspended/Deleted tickets
+# (Chatwoot has no suspension or soft-delete concept).
+account.users.each do |user|
+  folders = {
+    'All Unsolved' => filter_query(['status', 'equal_to', UNSOLVED]),
+    'Unassigned'   => filter_query(['status', 'equal_to', UNSOLVED],
+                                   ['assignee_id', 'is_not_present', []]),
+    'My Unsolved'  => filter_query(['status', 'equal_to', UNSOLVED],
+                                   ['assignee_id', 'equal_to', [user.id]]),
+    'Recently Solved' => filter_query(['status', 'equal_to', ['resolved']]),
+    # Zendesk's "All Unclassified Tickets Not Routed" — the Unassigned pool.
+    'Unclassified (No Team)' => filter_query(['status', 'equal_to', UNSOLVED],
+                                             ['team_id', 'is_not_present', []])
+  }
+
+  account.teams.each do |team|
+    folders["Unsolved — #{team.name.titleize}"] =
+      filter_query(['status', 'equal_to', UNSOLVED],
+                   ['team_id', 'equal_to', [team.id]])
+  end
+
+  folders.each do |name, query|
+    cf = CustomFilter.find_or_initialize_by(
+      account: account, user: user, filter_type: :conversation, name: name
+    )
+    cf.query = query
+    cf.save!
+  end
+  puts "folders for #{user.email}: #{account.custom_filters.where(user: user).count}"
 end

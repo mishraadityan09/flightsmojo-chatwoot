@@ -67,35 +67,99 @@ Tested end-to-end on 2026-07-29:
 
 ### Reference IDs
 
-| Thing | Value |
-|---|---|
-| Meta app | `FlightsMojo Support` — `1713817676541417` |
-| WhatsApp Business Account (WABA) | `1037638598623900` |
-| Test phone number ID | `1273116309212279` |
-| Chatwoot inbox | id `5` — "FlightsMojo WhatsApp (Test)" |
+**Meta app:** `FlightsMojo Support` — `1713817676541417`
+**Business:** `Flights Mojo India` — `1773181522856701`
 
 ⚠️ Do **not** use the app called `FlightsMojo Support - Test1`
 (`1030567489895817`). It has no WhatsApp capability — Meta test *apps* can't do
 WhatsApp. This cost us time; don't repeat it.
 
+#### WABAs (there are several — check which one you're on)
+
+| WABA | Partner | Numbers | Safe to use? |
+|---|---|---|---|
+| `104044112416466` | **Zendesk, full control** | `+91 92899 71896` (live), `+62 855-7480-0128` | ❌ can't send; India is live here |
+| `1040832508697203` "Flights Mojo USA" | none | `+1 929-349-3635` | ✅ |
+| `397110963478791` | none | `+91 92055 44547` (dormant, do not use) | ✅ but occupied |
+| `1037638598623900` "Test" | none | `+1 555 641 7975` test number | ✅ testing only |
+
+#### Live numbers by market
+
+| Number | Market | Chatwoot inbox |
+|---|---|---|
+| `+91 92899 71896` | India | — **on Zendesk, leave alone** |
+| `+1 929-349-3635` | US/Canada | inbox 8 |
+| `+62 855-7480-0128` | Indonesia | inbox 7 (receives, can't send — still on Zendesk's WABA) |
+| `+971 58 578 4933` | UAE | not yet added |
+| `+44 20 4578 5985` | UK (landline — verify by call) | not yet added |
+
+⚠️ Two India numbers are in circulation: the website's click-to-chat link points
+at `+91 92899 71896`, but `bot/faq.md` and all 68 canned responses quote
+`+91-7699976888`. One of these is wrong in front of customers today. Resolve
+before migrating India.
+
 ---
 
 ## What's left before customers can use it
 
-### 1. Move the real phone number — start this first
+### 1. Get each number onto a WABA we control — the real blocker
 
-`+91-7699976888` (the number on our website and in every canned response) has
-to move onto Meta Cloud API.
+Our numbers were **already on Cloud API**, so there is no migration off the
+WhatsApp Business app. The actual obstacle is different, and it took most of
+2026-07-29 to find.
 
-**This is disruptive and one-way:**
+#### Why sending can fail while receiving works
 
-- Whatever handles that number today stops receiving on it the moment it moves
-- No chat history comes across
-- Meta reviews the display name, which takes time
-- It becomes a **new inbox** in Chatwoot — the test inbox stays behind
+A WhatsApp Business Account (WABA) can have a **partner** assigned with *full
+control*. Ours had one:
 
-Needs a maintenance window and a heads-up to the support team. Everything else
-on this list is a day or two of work; this one waits on Meta, so start it now.
+```
+WABA 104044112416466 → partner: Zendesk - WhatsApp Add-on (full control)
+```
+
+With that in place our app could do everything **except send**:
+
+| Action | Works? | Why |
+|---|---|---|
+| Receive messages | ✅ | many apps can subscribe to a WABA's webhooks at once |
+| Read templates, numbers | ✅ | read access only |
+| **Send a message** | ❌ | requires being the WABA's controlling app |
+
+The error is `(#200) You do not have the necessary permissions to send messages
+on behalf of this WhatsApp Business Account`. Note it says *account*, not
+*number* — that wording is the clue.
+
+Things that did **not** fix it, all tried and confirmed:
+
+- a fresh access token (scopes were already correct)
+- subscribing our app to the WABA
+- disabling two-step verification and re-registering the number to our app
+- removing the number from Zendesk's own admin
+
+#### What does fix it
+
+**Put the number on a WABA with no partner assigned.** A WABA with zero
+subscribed apps and no partner lets our app take control and send.
+
+Confirmed 2026-07-29: `+1 929-349-3635` was moved to a fresh WABA
+(`Flights Mojo USA`, no partner), registered to our app, and behaved correctly.
+
+⚠️ **Partner permissions are WABA-wide, not per-number.** Removing Zendesk from
+a WABA affects *every* number on it. `+91 92899 71896` is live on Zendesk's
+WABA with a GREEN quality rating — **do not touch that WABA.** Move the other
+numbers off it instead.
+
+#### Practical sequence per number
+
+1. Disable **two-step verification** on the number (WhatsApp Manager → the
+   number → Two-step verification). You don't need the old PIN — there's a
+   "turn off" option.
+2. Move it to a partner-free WABA (or create one). The `phone_number_id`
+   **changes** — the Chatwoot inbox needs the new value.
+3. Register it to our app: `POST /{phone_number_id}/register` with a 6-digit
+   PIN. Chatwoot does this itself on inbox creation.
+4. Display name goes back through Meta review (`name_status: PENDING_REVIEW`),
+   which is Meta's queue — nothing to do but wait.
 
 ### 2. Meta approvals
 
@@ -123,10 +187,54 @@ address changes, **two** things must be re-pointed:
 
 ### 4. A permanent access token
 
-The token we're using expires after about an hour. When a token expires,
-sending silently stops working — nothing in the Chatwoot screen tells you why.
+**You set this once. You should never have to hand over a token again.**
 
-Replace it with a "System User" token set to never expire.
+There are two kinds, and using the wrong one is the single biggest time-waster
+in this whole setup:
+
+| | Temporary token | **System User token** |
+|---|---|---|
+| Where | API Setup page → "Generate access token" | Business settings → System users |
+| Lifetime | expires in ~1 hour | **never expires** |
+| Use for | poking at the API while developing | **production, and anything you want to still work tomorrow** |
+
+On 2026-07-29 we burned about five temporary tokens in an afternoon before
+switching. Don't repeat that.
+
+#### Creating the System User token
+
+`business.facebook.com` → **Business settings** → **Users → System users** → Add
+
+1. Name it e.g. `chatwoot-integration`, role **Admin**
+2. **Assign assets → Apps** → `FlightsMojo Support` → full control
+3. **Assign assets → WhatsApp accounts** → assign **every WABA you will use**,
+   with full control
+4. **Generate new token**:
+   - App: `FlightsMojo Support`
+   - **Expiration: Never**
+   - Permissions: `whatsapp_business_messaging` + `whatsapp_business_management`
+5. Copy it — **Meta shows it once only.** Store it somewhere the team can reach.
+
+⚠️ **Step 3 is the one people get wrong.** The token only works on WABAs the
+system user has been assigned. Miss one and that number fails with a permission
+error identical to the ones in "Why sending can fail" below — you'll waste an
+afternoon chasing the wrong cause.
+
+#### Where the token lives afterwards
+
+Paste it into each inbox's **API key** field in Chatwoot. It's stored in that
+inbox's `provider_config` in the database, so it survives restarts and
+redeploys. You touch it again only to rotate it deliberately.
+
+Because it lives in the database and not in `.env`, it does **not** transfer
+between environments. Production creates its own inboxes and you paste the same
+System User token into each — once.
+
+#### When a token does break
+
+Nothing tells you. Sending just stops; the error is buried in the message
+record with no banner and no alert. See the SMTP gap below — that is the only
+mechanism that would warn you, and it is currently switched off.
 
 ---
 

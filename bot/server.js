@@ -28,6 +28,11 @@ const {
   // GPT-5.6 Luna: OpenAI's cost tier ($0.20/$1.20 per 1M). Chosen 2026-08-03
   // after pricing R&D — supports function calling + automatic prompt caching.
   OPENAI_MODEL = "gpt-5.6-luna",
+  // Luna's reasoning dial: none/low/medium/high/xhigh. "none" is cheapest but
+  // proved trigger-happy on HANDOFF in prod testing (2026-08-03); "low" buys
+  // a little judgment for a few reasoning tokens. Tunable here so quality
+  // experiments don't need a code redeploy.
+  OPENAI_REASONING_EFFORT = "low",
   // Compose-network default. On PRODUCTION set this to the public HTTPS URL
   // (https://chat.flightsmojo.com): FORCE_SSL makes Rails 301 plain-HTTP API
   // calls to https://rails:3000, where the bot then speaks TLS at a plain
@@ -314,12 +319,10 @@ async function askOpenAI(history, systemPrompt) {
     const body = {
       model: OPENAI_MODEL,
       messages,
-      // Cost levers: replies are short plain lines per the prompt, and this
-      // is FAQ work — "none" spends zero output tokens (6x the price of
-      // input) on hidden chain-of-thought. (Luna's scale is none/low/medium/
-      // high/xhigh — "minimal" is rejected with a 400.)
+      // Cost levers: replies are short plain lines per the prompt. Reasoning
+      // effort comes from env (see OPENAI_REASONING_EFFORT above).
       max_completion_tokens: 512,
-      reasoning_effort: "none",
+      reasoning_effort: OPENAI_REASONING_EFFORT,
     };
     if (BOOKING_TOOL_ENABLED) {
       body.tools = OPENAI_TOOLS;

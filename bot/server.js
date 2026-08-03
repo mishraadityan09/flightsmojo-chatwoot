@@ -140,20 +140,34 @@ const chatwootHeaders = {
   api_access_token: CHATWOOT_BOT_TOKEN, // the bot's badge
 };
 
-function postReply(conversationId, content) {
-  return fetch(chatwootUrl(`/conversations/${conversationId}/messages`), {
+// fetch() resolves on 4xx/5xx — without this check a dead token or wrong
+// account id looks IDENTICAL to success in the logs (bug found 2026-08-03:
+// prod replies vanished with a clean log).
+async function chatwootPost(path, payload) {
+  const res = await fetch(chatwootUrl(path), {
     method: "POST",
     headers: chatwootHeaders,
-    body: JSON.stringify({ content, message_type: "outgoing" }),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `Chatwoot API ${res.status} on ${path}: ${(await res.text()).slice(0, 200)}`,
+    );
+  }
+  return res;
+}
+
+function postReply(conversationId, content) {
+  return chatwootPost(`/conversations/${conversationId}/messages`, {
+    content,
+    message_type: "outgoing",
   });
 }
 
 /** Flip pending → open: the chat appears in the human agents' queue. */
 function handoffToHuman(conversationId) {
-  return fetch(chatwootUrl(`/conversations/${conversationId}/toggle_status`), {
-    method: "POST",
-    headers: chatwootHeaders,
-    body: JSON.stringify({ status: "open" }),
+  return chatwootPost(`/conversations/${conversationId}/toggle_status`, {
+    status: "open",
   });
 }
 

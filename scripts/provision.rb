@@ -66,6 +66,22 @@ def filter_query(*clauses)
   { 'payload' => payload }
 end
 
+# This script provisions INTO an existing account; it does not create one.
+# The account is created by signing up the first admin user through the web UI.
+if Account.none?
+  abort <<~MSG
+    No account exists yet — nothing to provision into.
+
+    Sign up your admin user first, then re-run this script:
+      1. ENABLE_ACCOUNT_SIGNUP=true in .env  (and: docker compose up -d)
+      2. open FRONTEND_URL in a browser and create the admin account
+      3. re-run this script
+      4. set ENABLE_ACCOUNT_SIGNUP=false in .env  (and: docker compose up -d)
+
+    On a fresh server the signup page needs nginx + HTTPS working first.
+  MSG
+end
+
 account = Account.first!
 
 # ── Agent bot (webhook target is the bot container on the compose network) ──

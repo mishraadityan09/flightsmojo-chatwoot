@@ -151,6 +151,17 @@ ARTICLES = [
 
       All TripShield claim decisions are final and binding.
 
+      ## How is TripShield different from an airline refund?
+
+      - Airline refunds depend on fare rules and airline approval
+      - TripShield claims depend on TripShield eligibility and documentation
+
+      In some cases an airline refund may not be available while TripShield may still allow a claim (subject to approval). These are separate processes.
+
+      ## Before contacting support
+
+      For fastest resolution, submit your claim directly via the TripShield portal. Contact FlightsMojo support only if you are unable to submit a claim or locate your Booking ID.
+
       ## Quick FAQs
 
       - **Is TripShield an insurance policy?** No — it is a paid protection plan, not an insurance policy.
@@ -243,6 +254,10 @@ ARTICLES = [
 
       While your booking is In Progress, do not create a new booking or retry the payment — this can result in duplicate payments, multiple bookings, and delays in refunds.
 
+      ## What does FlightsMojo do in this case?
+
+      As soon as a booking goes into In Progress: our team actively follows up with the airline or supplier, the booking is prioritised for confirmation, and one of two actions is taken — ticket issued, or refund initiated promptly. You do not need to take any action unless requested.
+
       ## What are the chances of the ticket getting confirmed?
 
       Based on our experience, around 90% of "In Progress" bookings are successfully ticketed. In the remaining cases, a refund is initiated immediately.
@@ -253,6 +268,10 @@ ARTICLES = [
       - A refund receipt with the RRN / reference number is shared once processed
 
       Refund timelines by payment method: UPI usually within a few hours to 24 hours; credit/debit cards typically 3–5 working days; net banking usually 3–5 working days; wallets depend on the provider.
+
+      ## Will FlightsMojo hold my money?
+
+      No. If the ticket is not confirmed, it is either issued or the refund is processed promptly. Your money remains safe and fully tracked.
 
       ## Do service fees apply in this case?
 
@@ -362,6 +381,10 @@ ARTICLES = [
       ## Does this mean my ticket is not confirmed?
 
       No. If your booking is confirmed, your ticket is valid even if web check-in is not available. Web check-in restrictions do not mean your ticket is cancelled or invalid.
+
+      ## Special note for Group Fare bookings
+
+      For Group Fare tickets: web check-in may open later than usual, passenger names may reflect closer to departure, and airport check-in is always available. This is normal and handled by the airline.
 
       ## When should I contact support?
 

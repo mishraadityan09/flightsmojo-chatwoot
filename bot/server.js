@@ -137,7 +137,11 @@ function chatwootUrl(path) {
 
 const chatwootHeaders = {
   "Content-Type": "application/json",
-  api_access_token: CHATWOOT_BOT_TOKEN, // the bot's badge
+  // HYPHENS, not underscores: nginx silently drops underscore headers
+  // (ignore_invalid_headers default), which 401'd every prod reply while
+  // working fine on the Mac's direct bot->rails path. Rack normalizes both
+  // forms to HTTP_API_ACCESS_TOKEN, so hyphens work everywhere.
+  "api-access-token": CHATWOOT_BOT_TOKEN, // the bot's badge
 };
 
 // fetch() resolves on 4xx/5xx — without this check a dead token or wrong
@@ -294,29 +298,28 @@ async function askGemini(history, systemPrompt) {
 // prints cached_tokens so you can watch it kick in from the second call.
 
 const OPENAI_TOOLS = [
+  // Responses-API shape: flat, not nested under "function".
   {
     type: "function",
-    function: {
-      name: "get_booking_status",
-      description:
-        "Look up a FlightsMojo booking's status, flights, and payment state. " +
-        "Requires the customer's email AND at least one of: PNR, bookingId.",
-      parameters: {
-        type: "object",
-        properties: {
-          email: { type: "string", description: "Email used on the booking (mandatory)" },
-          pnr: { type: "string", description: "Airline PNR, e.g. M22W8V" },
-          bookingId: { type: "integer", description: "FlightsMojo booking id" },
-        },
-        required: ["email"],
+    name: "get_booking_status",
+    description:
+      "Look up a FlightsMojo booking's status, flights, and payment state. " +
+      "Requires the customer's email AND at least one of: PNR, bookingId.",
+    parameters: {
+      type: "object",
+      properties: {
+        email: { type: "string", description: "Email used on the booking (mandatory)" },
+        pnr: { type: "string", description: "Airline PNR, e.g. M22W8V" },
+        bookingId: { type: "integer", description: "FlightsMojo booking id" },
       },
+      required: ["email"],
     },
   },
 ];
 
 // Stored history is Gemini-shaped ({role: user|model, parts:[{text}]}) and
 // only ever contains plain text (tool rounds stay local to each ask* call).
-function toOpenAIMessages(history) {
+function toOpenAIInput(history) {
   return history.map((turn) => ({
     role: turn.role === "model" ? "assistant" : "user",
     content: turn.parts.map((p) => p.text || "").join(""),
@@ -324,26 +327,25 @@ function toOpenAIMessages(history) {
 }
 
 async function askOpenAI(history, systemPrompt) {
-  const messages = [
-    { role: "system", content: systemPrompt },
-    ...toOpenAIMessages(history),
-  ];
+  // /v1/responses, not /v1/chat/completions: Luna rejects function tools
+  // combined with reasoning_effort on the older endpoint (400, found in prod
+  // 2026-08-03). Responses is also where OpenAI ships new features first.
+  const input = toOpenAIInput(history);
 
   for (let round = 0; round < 4; round++) {
     const body = {
       model: OPENAI_MODEL,
-      messages,
-      // Cost levers: replies are short plain lines per the prompt. Reasoning
-      // effort comes from env (see OPENAI_REASONING_EFFORT above).
-      max_completion_tokens: 512,
-      reasoning_effort: OPENAI_REASONING_EFFORT,
+      instructions: systemPrompt,
+      input,
+      // Reasoning tokens spend from the output budget, so this cap covers
+      // "low" effort + a short reply. Visible output stays short per prompt.
+      max_output_tokens: 1024,
+      reasoning: { effort: OPENAI_REASONING_EFFORT },
+      store: false, // don't retain conversations on OpenAI's side
     };
-    if (BOOKING_TOOL_ENABLED) {
-      body.tools = OPENAI_TOOLS;
-      body.tool_choice = "auto";
-    }
+    if (BOOKING_TOOL_ENABLED) body.tools = OPENAI_TOOLS;
 
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -358,33 +360,42 @@ async function askOpenAI(history, systemPrompt) {
 
     // Caching visibility: cached_tokens > 0 from the 2nd call on = discount live.
     const u = json.usage || {};
-    const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+    const cached = u.input_tokens_details?.cached_tokens ?? 0;
     console.log(
-      `[openai] in=${u.prompt_tokens} (cached=${cached}) out=${u.completion_tokens}`,
+      `[openai] in=${u.input_tokens} (cached=${cached}) out=${u.output_tokens}`,
     );
 
-    const msg = json.choices?.[0]?.message;
-    if (!msg) throw new Error("OpenAI returned no message");
-
-    if (msg.tool_calls?.length) {
-      // Echo the assistant turn, then answer each tool call (we have one tool).
-      messages.push(msg);
-      for (const call of msg.tool_calls) {
+    const calls = (json.output || []).filter((o) => o.type === "function_call");
+    if (calls.length) {
+      for (const call of calls) {
         let args = {};
-        try { args = JSON.parse(call.function.arguments || "{}"); } catch {}
+        try { args = JSON.parse(call.arguments || "{}"); } catch {}
         const result = await executeBookingLookup(args);
-        messages.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: JSON.stringify(result),
+        input.push({
+          type: "function_call",
+          call_id: call.call_id,
+          name: call.name,
+          arguments: call.arguments,
+        });
+        input.push({
+          type: "function_call_output",
+          call_id: call.call_id,
+          output: JSON.stringify(result),
         });
       }
       continue;
     }
 
-    const text = (msg.content || "").trim();
-    if (!text) throw new Error("OpenAI returned an empty reply");
-    return text;
+    const text =
+      json.output_text ??
+      (json.output || [])
+        .filter((o) => o.type === "message")
+        .flatMap((m) => m.content || [])
+        .filter((c) => c.type === "output_text")
+        .map((c) => c.text)
+        .join("");
+    if (!text || !text.trim()) throw new Error("OpenAI returned an empty reply");
+    return text.trim();
   }
   throw new Error("Tool loop exceeded max rounds");
 }

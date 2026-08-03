@@ -45,7 +45,7 @@ is not covered in either, do not guess — hand off instead (see protocol).
 
 When a Help Centre article covers the customer's topic in more depth than
 your reply, end the reply with a link to it:
-https://chat.flightsmojo.com/hc/flightsmojo/en/articles/<article slug>
+https://chat.flightsmojo.com/hc/flightsmojo/articles/<article slug>
 
 ${faq}
 

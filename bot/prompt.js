@@ -6,6 +6,11 @@
 import { readFileSync } from "node:fs";
 
 const faq = readFileSync(new URL("./faq.md", import.meta.url), "utf8");
+// Help Centre articles — GENERATED from scripts/helpcenter_import.rb (the
+// single source of truth for article content). ~7k tokens; affordable
+// because OpenAI/Gemini prompt caching serves the stable prefix at ~10%
+// price. Regenerate bot/helpcenter.md whenever the import script changes.
+const helpcenter = readFileSync(new URL("./helpcenter.md", import.meta.url), "utf8");
 
 // Advertised only when the booking API is configured (see server.js tool loop).
 function bookingSection() {
@@ -35,10 +40,18 @@ consistent with this market — its currency, its site name — and never quote
 another market's prices or policies.
 
 ## Your knowledge
-Answer ONLY using the FAQ content below. If the answer is not covered there,
-do not guess — hand off instead (see protocol).
+Answer ONLY using the FAQ and the Help Centre articles below. If the answer
+is not covered in either, do not guess — hand off instead (see protocol).
+
+When a Help Centre article covers the customer's topic in more depth than
+your reply, end the reply with a link to it:
+https://chat.flightsmojo.com/hc/flightsmojo/en/articles/<article slug>
 
 ${faq}
+
+## Help Centre articles
+
+${helpcenter}
 
 ## Rules
 - Reply in the same language the customer writes in.

@@ -20,6 +20,14 @@ import { buildSystemPrompt } from "./prompt.js";
 const {
   GEMINI_API_KEY,
   GEMINI_MODEL = "gemini-2.5-flash",
+  // Provider switch (2026-08-03): "gemini" (default) or "openai". Both paths
+  // share the same history, prompt, and booking tool — flipping this env var
+  // is the whole migration, and the way back.
+  BOT_PROVIDER = "gemini",
+  OPENAI_API_KEY,
+  // GPT-5.6 Luna: OpenAI's cost tier ($0.20/$1.20 per 1M). Chosen 2026-08-03
+  // after pricing R&D — supports function calling + automatic prompt caching.
+  OPENAI_MODEL = "gpt-5.6-luna",
   CHATWOOT_BASE_URL = "http://rails:3000", // compose network: service name = hostname
   CHATWOOT_ACCOUNT_ID,
   CHATWOOT_BOT_TOKEN,
@@ -76,9 +84,19 @@ const histories = new Map(); // conversationId -> [{ role, parts }]
 function remember(conversationId, role, text) {
   const history = histories.get(conversationId) ?? [];
   history.push({ role, parts: [{ text }] });
-  while (history.length > 20) history.shift(); // keep the last 10 exchanges
+  // Cost lever (2026-08-03): 12 turns = 6 exchanges. Support chats resolve or
+  // hand off well before that, and history is the second-biggest input cost
+  // after the system prompt.
+  while (history.length > 12) history.shift();
   histories.set(conversationId, history);
   return history;
+}
+
+// One seam, two providers. History is stored Gemini-style; askOpenAI converts.
+function askLLM(history, systemPrompt) {
+  return BOT_PROVIDER === "openai"
+    ? askOpenAI(history, systemPrompt)
+    : askGemini(history, systemPrompt);
 }
 
 async function handleCustomerMessage(event) {
@@ -86,7 +104,7 @@ async function handleCustomerMessage(event) {
   console.log(`[conv ${conversationId}] customer: ${event.content}`);
 
   const history = remember(conversationId, "user", event.content);
-  const reply = await askGemini([...history], systemPromptFor(event.conversation.inbox_id));
+  const reply = await askLLM([...history], systemPromptFor(event.conversation.inbox_id));
   console.log(`[conv ${conversationId}] bot: ${reply}`);
 
   if (reply.trim() === "HANDOFF" || reply.includes("HANDOFF")) {
@@ -240,6 +258,116 @@ async function askGemini(history, systemPrompt) {
   throw new Error("Tool loop exceeded max rounds");
 }
 
+// ── OpenAI path (GPT-5.6 Luna) ──
+// Same contract as askGemini: takes Gemini-style history + system prompt,
+// returns reply text (or a HANDOFF-containing string). Differences live
+// entirely in this function so the rest of the bot doesn't know which
+// provider answered.
+//
+// Prompt caching is AUTOMATIC on OpenAI: any identical prompt prefix over
+// ~1024 tokens is cached (~90% discount on those tokens). Our system prompt
+// is ~2.5k tokens and byte-stable per inbox (promptCache above), so it
+// qualifies as long as nothing dynamic is prepended. The usage log below
+// prints cached_tokens so you can watch it kick in from the second call.
+
+const OPENAI_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "get_booking_status",
+      description:
+        "Look up a FlightsMojo booking's status, flights, and payment state. " +
+        "Requires the customer's email AND at least one of: PNR, bookingId.",
+      parameters: {
+        type: "object",
+        properties: {
+          email: { type: "string", description: "Email used on the booking (mandatory)" },
+          pnr: { type: "string", description: "Airline PNR, e.g. M22W8V" },
+          bookingId: { type: "integer", description: "FlightsMojo booking id" },
+        },
+        required: ["email"],
+      },
+    },
+  },
+];
+
+// Stored history is Gemini-shaped ({role: user|model, parts:[{text}]}) and
+// only ever contains plain text (tool rounds stay local to each ask* call).
+function toOpenAIMessages(history) {
+  return history.map((turn) => ({
+    role: turn.role === "model" ? "assistant" : "user",
+    content: turn.parts.map((p) => p.text || "").join(""),
+  }));
+}
+
+async function askOpenAI(history, systemPrompt) {
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...toOpenAIMessages(history),
+  ];
+
+  for (let round = 0; round < 4; round++) {
+    const body = {
+      model: OPENAI_MODEL,
+      messages,
+      // Cost levers: replies are short plain lines per the prompt, and this
+      // is FAQ work — minimal reasoning effort keeps output tokens (6x the
+      // price of input) from being spent on hidden chain-of-thought.
+      max_completion_tokens: 512,
+      reasoning_effort: "minimal",
+    };
+    if (BOOKING_TOOL_ENABLED) {
+      body.tools = OPENAI_TOOLS;
+      body.tool_choice = "auto";
+    }
+
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new Error(`OpenAI API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    }
+    const json = await res.json();
+
+    // Caching visibility: cached_tokens > 0 from the 2nd call on = discount live.
+    const u = json.usage || {};
+    const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+    console.log(
+      `[openai] in=${u.prompt_tokens} (cached=${cached}) out=${u.completion_tokens}`,
+    );
+
+    const msg = json.choices?.[0]?.message;
+    if (!msg) throw new Error("OpenAI returned no message");
+
+    if (msg.tool_calls?.length) {
+      // Echo the assistant turn, then answer each tool call (we have one tool).
+      messages.push(msg);
+      for (const call of msg.tool_calls) {
+        let args = {};
+        try { args = JSON.parse(call.function.arguments || "{}"); } catch {}
+        const result = await executeBookingLookup(args);
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify(result),
+        });
+      }
+      continue;
+    }
+
+    const text = (msg.content || "").trim();
+    if (!text) throw new Error("OpenAI returned an empty reply");
+    return text;
+  }
+  throw new Error("Tool loop exceeded max rounds");
+}
+
 app.listen(PORT, () => {
-  console.log(`FlightsMojo support bot listening on :${PORT} (model: ${GEMINI_MODEL})`);
+  const model = BOT_PROVIDER === "openai" ? OPENAI_MODEL : GEMINI_MODEL;
+  console.log(`FlightsMojo support bot listening on :${PORT} (${BOT_PROVIDER}: ${model})`);
 });

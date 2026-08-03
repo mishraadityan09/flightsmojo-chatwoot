@@ -28,7 +28,11 @@ const {
   // GPT-5.6 Luna: OpenAI's cost tier ($0.20/$1.20 per 1M). Chosen 2026-08-03
   // after pricing R&D — supports function calling + automatic prompt caching.
   OPENAI_MODEL = "gpt-5.6-luna",
-  CHATWOOT_BASE_URL = "http://rails:3000", // compose network: service name = hostname
+  // Compose-network default. On PRODUCTION set this to the public HTTPS URL
+  // (https://chat.flightsmojo.com): FORCE_SSL makes Rails 301 plain-HTTP API
+  // calls to https://rails:3000, where the bot then speaks TLS at a plain
+  // port — ERR_SSL_WRONG_VERSION_NUMBER, and no reply/handoff ever lands.
+  CHATWOOT_BASE_URL = "http://rails:3000",
   CHATWOOT_ACCOUNT_ID,
   CHATWOOT_BOT_TOKEN,
   PORT = 3002,
@@ -311,10 +315,11 @@ async function askOpenAI(history, systemPrompt) {
       model: OPENAI_MODEL,
       messages,
       // Cost levers: replies are short plain lines per the prompt, and this
-      // is FAQ work — minimal reasoning effort keeps output tokens (6x the
-      // price of input) from being spent on hidden chain-of-thought.
+      // is FAQ work — "none" spends zero output tokens (6x the price of
+      // input) on hidden chain-of-thought. (Luna's scale is none/low/medium/
+      // high/xhigh — "minimal" is rejected with a 400.)
       max_completion_tokens: 512,
-      reasoning_effort: "minimal",
+      reasoning_effort: "none",
     };
     if (BOOKING_TOOL_ENABLED) {
       body.tools = OPENAI_TOOLS;

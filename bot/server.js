@@ -102,18 +102,28 @@ function remember(conversationId, role, text) {
 }
 
 // One seam, two providers. History is stored Gemini-style; askOpenAI converts.
-function askLLM(history, systemPrompt) {
+// conversationId is threaded so the booking tool can persist what it looked up.
+function askLLM(history, systemPrompt, conversationId) {
   return BOT_PROVIDER === "openai"
-    ? askOpenAI(history, systemPrompt)
-    : askGemini(history, systemPrompt);
+    ? askOpenAI(history, systemPrompt, conversationId)
+    : askGemini(history, systemPrompt, conversationId);
 }
 
 async function handleCustomerMessage(event) {
   const conversationId = event.conversation.id;
   console.log(`[conv ${conversationId}] customer: ${event.content}`);
 
+  // Known booking id survives bot restarts / history scroll-out because it
+  // lives on the conversation (custom attribute), not just in RAM. Chatwoot
+  // sends it in the webhook payload; inject it so the bot never re-asks.
+  let systemPrompt = systemPromptFor(event.conversation.inbox_id);
+  const knownBookingId = event.conversation.custom_attributes?.booking_id;
+  if (knownBookingId) {
+    systemPrompt += `\n\n## Already known about THIS customer\nBooking ID: ${knownBookingId}. You ALREADY have it — never ask for the booking id again. Use it directly for any lookup (still ask for the email if you need it for verification).`;
+  }
+
   const history = remember(conversationId, "user", event.content);
-  const reply = await askLLM([...history], systemPromptFor(event.conversation.inbox_id));
+  const reply = await askLLM([...history], systemPrompt, conversationId);
   console.log(`[conv ${conversationId}] bot: ${reply}`);
 
   if (reply.trim() === "HANDOFF" || reply.includes("HANDOFF")) {
@@ -175,6 +185,25 @@ function handoffToHuman(conversationId) {
   });
 }
 
+/**
+ * Persist the booking id onto the conversation (custom attribute), so it
+ * survives bot restarts and history scroll-out, shows in the agent's info
+ * panel, and feeds the CRM dashboard app. This is what makes "don't ask for
+ * the booking id twice" reliable rather than RAM-dependent. Best-effort:
+ * a failure here must never break the reply.
+ */
+async function stampBookingId(conversationId, bookingId) {
+  if (!conversationId || !bookingId) return;
+  try {
+    await chatwootPost(`/conversations/${conversationId}/custom_attributes`, {
+      custom_attributes: { booking_id: String(bookingId) },
+    });
+    console.log(`[conv ${conversationId}] stamped booking_id=${bookingId}`);
+  } catch (e) {
+    console.error(`stamp booking_id failed (non-fatal): ${e.message}`);
+  }
+}
+
 // ── Booking lookup tool (least-privilege bot API, X-Api-Key auth) ──
 // Verification rule: email is MANDATORY plus PNR or bookingId. Enforced in
 // three layers: tool schema, prompt rules, and the hard check below.
@@ -232,7 +261,7 @@ async function executeBookingLookup(args = {}) {
 // between calls. When it returns a functionCall instead of text, we run the
 // tool, append the result, and call again (bounded rounds).
 
-async function askGemini(history, systemPrompt) {
+async function askGemini(history, systemPrompt, conversationId) {
   const contents = [...history];
 
   for (let round = 0; round < 4; round++) {
@@ -268,6 +297,9 @@ async function askGemini(history, systemPrompt) {
     // Echo the model turn verbatim (keeps functionCall id + thoughtSignature
     // intact — required by the API), then append our tool result.
     const result = await executeBookingLookup(fcPart.functionCall.args);
+    if (fcPart.functionCall.args?.bookingId) {
+      stampBookingId(conversationId, fcPart.functionCall.args.bookingId);
+    }
     contents.push(content);
     contents.push({
       role: "user",
@@ -326,7 +358,7 @@ function toOpenAIInput(history) {
   }));
 }
 
-async function askOpenAI(history, systemPrompt) {
+async function askOpenAI(history, systemPrompt, conversationId) {
   // /v1/responses, not /v1/chat/completions: Luna rejects function tools
   // combined with reasoning_effort on the older endpoint (400, found in prod
   // 2026-08-03). Responses is also where OpenAI ships new features first.
@@ -371,6 +403,7 @@ async function askOpenAI(history, systemPrompt) {
         let args = {};
         try { args = JSON.parse(call.arguments || "{}"); } catch {}
         const result = await executeBookingLookup(args);
+        if (args?.bookingId) stampBookingId(conversationId, args.bookingId);
         input.push({
           type: "function_call",
           call_id: call.call_id,

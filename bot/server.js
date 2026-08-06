@@ -128,18 +128,25 @@ async function handleCustomerMessage(event) {
     conv.custom_attributes?.email,
   ];
   const knownEmail = emailCandidates.find((e) => e && String(e).includes("@"));
-  console.log(`[conv ${conversationId}] known: email=${knownEmail ? "yes" : "no"} booking_id=${knownBookingId || "-"}`);
+  const knownName = conv.meta?.sender?.name || event.sender?.name;
+  const firstName = knownName ? String(knownName).trim().split(/\s+/)[0] : null;
+  console.log(`[conv ${conversationId}] known: email=${knownEmail ? "yes" : "no"} booking_id=${knownBookingId || "-"} name=${firstName || "-"}`);
 
   let systemPrompt = systemPromptFor(conv.inbox_id);
   const known = [];
+  if (firstName) known.push(`Customer's first name: ${firstName} (you may greet them by it once, naturally — don't overuse it)`);
   if (knownEmail) known.push(`Email: ${knownEmail} (already provided — do NOT ask for the email again; use it for lookups)`);
   if (knownBookingId) known.push(`Booking ID: ${knownBookingId} (already provided — do NOT ask for the booking id again; use it directly)`);
   if (known.length) {
     systemPrompt += `\n\n## Already known about THIS customer\n${known.join("\n")}\nIf you have BOTH an email and a booking id/PNR here, call the lookup tool straight away instead of asking for anything.`;
   }
 
+  // "…is typing" while we think/look up, so the customer sees the bot is
+  // working instead of silence (which makes them re-type). Best-effort.
+  typingOn(conversationId);
   const history = remember(conversationId, "user", event.content);
   const reply = await askLLM([...history], systemPrompt, conversationId);
+  typingOff(conversationId);
   console.log(`[conv ${conversationId}] bot: ${reply}`);
 
   if (reply.trim() === "HANDOFF" || reply.includes("HANDOFF")) {
@@ -200,6 +207,16 @@ function handoffToHuman(conversationId) {
     status: "open",
   });
 }
+
+/** Show/hide the "…is typing" indicator. Best-effort — a failure here must
+ *  never affect the reply, so we swallow errors. */
+function toggleTyping(conversationId, status) {
+  chatwootPost(`/conversations/${conversationId}/toggle_typing_status`, {
+    typing_status: status,
+  }).catch(() => {});
+}
+const typingOn = (id) => toggleTyping(id, "on");
+const typingOff = (id) => toggleTyping(id, "off");
 
 /**
  * Persist the booking id onto the conversation (custom attribute), so it

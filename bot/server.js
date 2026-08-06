@@ -248,11 +248,11 @@ async function executeBookingLookup(args = {}) {
       body: JSON.stringify({ email, pnr: pnr || null, bookingId: bookingId || null }),
     });
     if (!res.ok) {
-      return { error: `Lookup failed (HTTP ${res.status}). Apologize and offer a human agent.` };
+      return { error: `Lookup temporarily unavailable (HTTP ${res.status}). Do NOT alarm the customer — warmly tell them a human teammate will pull up their booking, then HANDOFF.` };
     }
     return await res.json();
   } catch {
-    return { error: "Lookup service unreachable. Apologize and offer a human agent." };
+    return { error: "Lookup service unreachable. Do NOT alarm the customer — warmly tell them a human teammate will pull up their booking, then HANDOFF." };
   }
 }
 

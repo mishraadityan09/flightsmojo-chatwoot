@@ -113,13 +113,29 @@ async function handleCustomerMessage(event) {
   const conversationId = event.conversation.id;
   console.log(`[conv ${conversationId}] customer: ${event.content}`);
 
-  // Known booking id survives bot restarts / history scroll-out because it
-  // lives on the conversation (custom attribute), not just in RAM. Chatwoot
-  // sends it in the webhook payload; inject it so the bot never re-asks.
-  let systemPrompt = systemPromptFor(event.conversation.inbox_id);
-  const knownBookingId = event.conversation.custom_attributes?.booking_id;
-  if (knownBookingId) {
-    systemPrompt += `\n\n## Already known about THIS customer\nBooking ID: ${knownBookingId}. You ALREADY have it — never ask for the booking id again. Use it directly for any lookup (still ask for the email if you need it for verification).`;
+  // What we ALREADY know about this customer — from the pre-chat form (email
+  // → contact record) and prior lookups (booking_id → conversation attribute).
+  // Both ride in the webhook payload, so they survive bot restarts / history
+  // scroll-out. Inject them so the bot never re-asks for something it has.
+  const conv = event.conversation || {};
+  const knownBookingId = conv.custom_attributes?.booking_id;
+  // Email can sit in a few payload spots depending on channel/version; take
+  // the first that looks like an email. (Debug line below shows what arrived.)
+  const emailCandidates = [
+    conv.meta?.sender?.email,
+    event.sender?.email,
+    conv.contact_inbox?.contact?.email,
+    conv.custom_attributes?.email,
+  ];
+  const knownEmail = emailCandidates.find((e) => e && String(e).includes("@"));
+  console.log(`[conv ${conversationId}] known: email=${knownEmail ? "yes" : "no"} booking_id=${knownBookingId || "-"}`);
+
+  let systemPrompt = systemPromptFor(conv.inbox_id);
+  const known = [];
+  if (knownEmail) known.push(`Email: ${knownEmail} (already provided — do NOT ask for the email again; use it for lookups)`);
+  if (knownBookingId) known.push(`Booking ID: ${knownBookingId} (already provided — do NOT ask for the booking id again; use it directly)`);
+  if (known.length) {
+    systemPrompt += `\n\n## Already known about THIS customer\n${known.join("\n")}\nIf you have BOTH an email and a booking id/PNR here, call the lookup tool straight away instead of asking for anything.`;
   }
 
   const history = remember(conversationId, "user", event.content);

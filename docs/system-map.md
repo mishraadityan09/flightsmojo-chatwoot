@@ -634,9 +634,12 @@ and needs headroom in Docker Desktop's disk limit — a full VM disk shows up as
    MISCONF, Postgres crash loop, CPU pegged by apport). Fixed by truncating
    the two logs. **Log rotation** is in `docker-compose.yml` since 22 Sep 2026
    (json-file, 50 MB × 3 per service) and takes effect when the 4.18 deploy
-   recreates the containers; until then logs still grow ~0.4 GB/day. Backup script
-   `/root/backup-chatwoot.sh` (03:30 UTC cron) not yet verified or confirmed
-   off-box. Pending kernel reboot; 25 dead Sidekiq jobs; no CloudWatch alarm.
+   recreates the containers; until then the disk fills ~0.65 GB/day (18 GB free
+   on 22 Sep → full ~mid-October). Backups **verified 22 Sep**:
+   `/root/backup-chatwoot.sh` (03:30 UTC cron, `pg_dump | gzip`, size-checked,
+   14-day retention, ~30 MB/night) into `/root/backups/` — but **on-box only**
+   and **DB only** (attachments volume not included); an S3 copy is the next
+   ops item. Compose project on the server: `/root/flightsmojo-chatwoot`. Pending kernel reboot; 25 dead Sidekiq jobs; no CloudWatch alarm.
 3. Support site Phase 2 (tickets) blocked on an API-channel inbox plus **three**
    pieces of email config, not one (§14): `email_continuity_on_api_channel`,
    `inbound_emails` + `account.inbound_email_domain`, and a working

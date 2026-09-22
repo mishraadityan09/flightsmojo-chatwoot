@@ -315,8 +315,10 @@ pushed):** upstream **v4.18.0** merged (clean; 25 migrations since 4.16.0), plus
 `AssignmentService` returns the agent who most recently sent a **public
 outgoing message as a `User`** to this customer within
 `STICKY_ASSIGNMENT_LOOKBACK = 90.days` — measured from the reply, across all
-the customer's conversations, with contacts linked across channels by **phone
-number** (email can't link: contacts are unique per email per account). It is
+of that contact's conversations (Chatwoot keeps one contact per email / phone
+number per account, so a channel sharing an identifier already shares the
+contact; there is no separate cross-channel matching). `Message` has a
+`default_scope` ordering ascending, hence `reorder`. It is
 passed as `preferred_user_id:` into the selector (`RoundRobinSelector` →
 `InboxRoundRobinService#available_agent(preferred_agent_id:)`, and the
 enterprise `BalancedSelector`), i.e. **after** every eligibility filter

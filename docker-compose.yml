@@ -10,6 +10,16 @@
 # All passwords/secrets come from .env (gitignored). Copy .env.example → .env
 # and fill it in if setting up fresh.
 
+# Container logs. Docker's json-file driver keeps every line forever by
+# default: on 2026-09-19 the sidekiq (11 GB) and rails (8.6 GB) logs filled
+# the 28 GB disk and took the site down. 50 MB × 3 files per service caps
+# the lot at ~1 GB. Applies when a container is (re)created, not on restart.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '50m'
+    max-file: '3'
+
 services:
   base: &base
     # FlightsMojo-branded Chatwoot CE, built by the fork's CI
@@ -20,6 +30,7 @@ services:
     # staging pull it anyway and run via Rosetta; no-op on Intel hosts.
     platform: linux/amd64
     env_file: .env
+    logging: *default-logging
     volumes:
       # Uploaded files (avatars, attachments) persist here across restarts.
       - storage_data:/app/storage
@@ -59,6 +70,7 @@ services:
     image: pgvector/pgvector:pg16
     restart: always
     env_file: .env
+    logging: *default-logging
     ports:
       # Exposed on localhost only so you can poke at the DB with psql while learning.
       - '127.0.0.1:5432:5432'
@@ -72,6 +84,7 @@ services:
     restart: always
     command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\""]
     env_file: .env
+    logging: *default-logging
     ports:
       # Exposed on localhost only so you can explore with redis-cli while learning.
       - '127.0.0.1:6379:6379'
@@ -83,6 +96,7 @@ services:
     # webhooks and replies via Gemini. See bot/server.js for the full story.
     build: ./bot
     env_file: .env
+    logging: *default-logging
     restart: always
     depends_on:
       - rails

@@ -623,8 +623,9 @@ and needs headroom in Docker Desktop's disk limit — a full VM disk shows up as
 2b. **Ops (Sep 19 outage):** docker json-file logs are unrotated and filled
    the 28 GB disk (sidekiq 11 GB, rails 8.6 GB in 6 weeks → 500s, Redis
    MISCONF, Postgres crash loop, CPU pegged by apport). Fixed by truncating
-   the two logs. **Log rotation (compose `logging:` limits) still pending**
-   — ~0.4 GB/day, so it recurs around early November. Backup script
+   the two logs. **Log rotation** is in `docker-compose.yml` since 22 Sep 2026
+   (json-file, 50 MB × 3 per service) and takes effect when the 4.18 deploy
+   recreates the containers; until then logs still grow ~0.4 GB/day. Backup script
    `/root/backup-chatwoot.sh` (03:30 UTC cron) not yet verified or confirmed
    off-box. Pending kernel reboot; 25 dead Sidekiq jobs; no CloudWatch alarm.
 3. Support site Phase 2 (tickets) blocked on an API-channel inbox plus **three**

@@ -15,7 +15,7 @@ services:
     # FlightsMojo-branded Chatwoot CE, built by the fork's CI
     # (github.com/mishraadityan09/chatwoot, branch flightsmojo).
     # Pinned tag = deliberate upgrades only; bump -fmN per fork change.
-    image: ghcr.io/mishraadityan09/chatwoot:v4.16.0-fm1
+    image: ghcr.io/mishraadityan09/chatwoot:v4.18.0-fm2
     # Image is built amd64-only (matches prod EC2). This makes Apple-Silicon
     # staging pull it anyway and run via Rosetta; no-op on Intel hosts.
     platform: linux/amd64

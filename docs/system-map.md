@@ -329,7 +329,14 @@ relationship. Kill switch `DISABLE_STICKY_ASSIGNMENT` is parsed with
 
 ### Review findings on this branch (Aug 2026, `/code-review` max effort)
 
-**Status 22 Sep 2026** — a second review confirmed the same list, nothing new.
+**Status 22 Sep 2026** — a second review confirmed the same list, nothing new;
+a third pass on the finished commits added: campaign sends counted as agent
+replies (fixed — `additional_attributes.campaign_id` excluded), the open-count
+round guard could starve under load (fixed — compares against the last
+*committed* round), the `BK-` chip showed any visitor-written value (now only
+`^\d{1,10}$`; stripping `booking_id` from the widget API is a follow-up),
+`trigger.rb` now uses `bot_handoff!`, the dark-mode logo tags point at the
+`.png` that exists, and version images are built from git tags.
 Fixed in the commits above: **1, 2, 3, 4, 5, 7, 8, 10, 11, 12, 14 (except the
 unmount timer), 16, 17, 18**, plus the `getInboxOpenCount`/`assignee_type`
 and `BK-` chip cleanups; 9 largely (one `available_agents` call, no SCAN
@@ -477,11 +484,13 @@ accounts because account switch and logout are full `window.location`
 navigations; existing RSpec stays green because the conversation factory gives
 each conversation a unique sequenced email and no phone.
 
-**Shipping the fork.** CI tag is already bumped to `v4.18.0-fm2` on the branch
-(pushing `flightsmojo` without that would overwrite `-fm1`, which prod pins).
-Path: push the branch → PR into `flightsmojo` (the upstream `run_foss_spec`
-workflow runs on any PR: rubocop, brakeman, eslint, vitest, rspec) → merge →
-CI publishes → compose pin (already `v4.18.0-fm2` in the hub repo) →
+**Shipping the fork.** Version images are built from **git tags**
+(`flightsmojo_image.yml`: a tag matching `v*-fm*` publishes that exact image
+tag, immutable; branch pushes only refresh `flightsmojo-latest`). Path: push
+the branch → PR into `flightsmojo` (the upstream `run_foss_spec` workflow
+runs on any PR: rubocop, brakeman, eslint, vitest, rspec) → merge →
+`git tag v4.18.0-fm2 && git push origin v4.18.0-fm2` → CI publishes →
+compose pin (already `v4.18.0-fm2` in the hub repo) →
 `docker compose pull && up -d` on the server in a quiet window.
 **4.16.0 → 4.18.0 carries 25 migrations**, so rollback is *not* just
 re-pinning the old tag: take a `pg_dump` first and restore it if you roll

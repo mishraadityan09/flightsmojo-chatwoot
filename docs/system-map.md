@@ -6,7 +6,7 @@
 > behaviours that cost time to rediscover. Read this before grepping.
 >
 > **Accuracy notes.** Verified against the code in August 2026 at release
-> **4.16.0**; §1, §9 and §13 updated 22 Sep 2026 for the **4.18.0** merge.
+> **4.16.0**; §1, §9 and §13 updated 22–23 Sep 2026 for the **4.18.0** release.
 > Line numbers are signposts, not guarantees — they drift with upstream
 > merges and with our own edits (§9 changes shift several of the numbers in
 > §10). Trust the file + method name; re-check the line.
@@ -18,7 +18,7 @@
 | Repo | Path | Contains | Ships as |
 |---|---|---|---|
 | **Hub** | `~/Work/flightsmojo/flightsmojo-chatwoot` | `docker-compose.yml`, the AI bot (`bot/`), provisioning scripts, these docs | Only `bot/` becomes an image (built on the server) |
-| **Fork** | `~/Work/flightsmojo/chatwoot-fork` | Chatwoot fork, branch `flightsmojo` — **4.16.0 in prod**, 4.18.0 + our features ready on `feat/fm-booking-badge-inbox-counts` (§9) | CI → `ghcr.io/mishraadityan09/chatwoot:v4.16.0-fm1` (prod) / `v4.18.0-fm3` (next) |
+| **Fork** | `~/Work/flightsmojo/chatwoot-fork` | Chatwoot fork, branch `flightsmojo` — **4.18.0 + our features, in prod since 23 Sep 2026** (§9) | CI (git tag) → `ghcr.io/mishraadityan09/chatwoot:v4.18.0-fm3` (prod); `v4.16.0-fm1` kept on the box for rollback |
 | **Support site** | `~/Work/flightsmojo/flightsmojo-support` | Next.js 16 help/ticket website, 8 country domains | `next build` → Windows IIS via iisnode |
 
 Production stack (compose): `rails`, `sidekiq`, `postgres` (pgvector), `redis`,
@@ -33,7 +33,7 @@ graph TB
         HS[Support website<br/>Next.js, 8 domains]
     end
     subgraph Server["EC2 — docker compose"]
-        R[rails<br/>Chatwoot 4.16 fork]
+        R[rails<br/>Chatwoot 4.18 fork]
         SK[sidekiq]
         PG[(postgres)]
         RD[(redis)]
@@ -622,11 +622,11 @@ and needs headroom in Docker Desktop's disk limit — a full VM disk shows up as
 
 ## 13. Open threads (Aug 2026)
 
-1. **Fork release `v4.18.0-fm3`** (UI + sticky assignment + upstream 4.17.0,
-   4.17.1, 4.18.0 incl. their security fixes): committed on
-   `feat/fm-booking-badge-inbox-counts` 22 Sep 2026, vitest green locally
-   (4240 tests); **not pushed, rspec not yet run** (no Ruby 3.4 locally —
-   the PR's CI does it). Deploy needs a verified backup first (§9 shipping).
+1. **Fork release `v4.18.0-fm3` — DEPLOYED 23 Sep 2026 ~07:13 UTC** (PRs #1–#4 on
+   `flightsmojo`, all CI-green; 25 additive migrations; downtime < 2 min). Prod
+   reports 4.18.0. Post-deploy: remove the `v4.16.0-fm1` image from the box
+   after a week (`docker image rm`), and the stray exited `base-1` container is
+   still created by the `base:` service on every `up` (harmless).
 2. Left over from the review (§9): finding 13 (`/meta` fan-out), 15 (sidebar
    re-render), 6 (confirm `assignment_v2` is on for the FlightsMojo account
    in Super Admin — with it off, sticky assignment is inert). Also check every
@@ -636,10 +636,9 @@ and needs headroom in Docker Desktop's disk limit — a full VM disk shows up as
 2b. **Ops (Sep 19 outage):** docker json-file logs are unrotated and filled
    the 28 GB disk (sidekiq 11 GB, rails 8.6 GB in 6 weeks → 500s, Redis
    MISCONF, Postgres crash loop, CPU pegged by apport). Fixed by truncating
-   the two logs. **Log rotation** is in `docker-compose.yml` since 22 Sep 2026
-   (json-file, 50 MB × 3 per service) and takes effect when the 4.18 deploy
-   recreates the containers; until then the disk fills ~0.65 GB/day (18 GB free
-   on 22 Sep → full ~mid-October). Backups **verified 22 Sep**:
+   the two logs. **Log rotation is live since the 23 Sep deploy** (json-file, 50 MB × 3 per
+   service, verified via `docker inspect … LogConfig`); 16 GB free after the
+   deploy, and the disk no longer grows except ~30 MB/night of backups. Backups **verified 22 Sep**:
    `/root/backup-chatwoot.sh` (03:30 UTC cron, `pg_dump | gzip`, size-checked,
    14-day retention, ~30 MB/night) into `/root/backups/` — but **on-box only**
    and **DB only** (attachments volume not included); an S3 copy is the next

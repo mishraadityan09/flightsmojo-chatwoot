@@ -18,7 +18,7 @@
 | Repo | Path | Contains | Ships as |
 |---|---|---|---|
 | **Hub** | `~/Work/flightsmojo/flightsmojo-chatwoot` | `docker-compose.yml`, the AI bot (`bot/`), provisioning scripts, these docs | Only `bot/` becomes an image (built on the server) |
-| **Fork** | `~/Work/flightsmojo/chatwoot-fork` | Chatwoot fork, branch `flightsmojo` — **4.16.0 in prod**, 4.18.0 + our features ready on `feat/fm-booking-badge-inbox-counts` (§9) | CI → `ghcr.io/mishraadityan09/chatwoot:v4.16.0-fm1` (prod) / `v4.18.0-fm2` (next) |
+| **Fork** | `~/Work/flightsmojo/chatwoot-fork` | Chatwoot fork, branch `flightsmojo` — **4.16.0 in prod**, 4.18.0 + our features ready on `feat/fm-booking-badge-inbox-counts` (§9) | CI → `ghcr.io/mishraadityan09/chatwoot:v4.16.0-fm1` (prod) / `v4.18.0-fm3` (next) |
 | **Support site** | `~/Work/flightsmojo/flightsmojo-support` | Next.js 16 help/ticket website, 8 country domains | `next build` → Windows IIS via iisnode |
 
 Production stack (compose): `rails`, `sidekiq`, `postgres` (pgvector), `redis`,
@@ -309,7 +309,7 @@ pushed):** upstream **v4.18.0** merged (clean; 25 migrations since 4.16.0), plus
 | | `helper/actionCable.js`, `helper/ReconnectService.js` | fetch on `onConversationCreated`, `onStatusChange` and after `revalidateCaches` on reconnect |
 | `feat(assignment)` | `services/auto_assignment/{assignment_service,round_robin_selector,inbox_round_robin_service}.rb`, `enterprise/.../{assignment_service,balanced_selector}.rb` | **Sticky assignment** (below) |
 | `fix(webhooks)` | `lib/webhooks/trigger.rb` | 4.18 assigns a pending conversation to the inbox bot (`ai_assignee`); the bot-failure fallback (`update_conversation_status`) opened the conversation but left that in place, so `unassigned` excluded it and no agent ever got it. We clear `ai_assignee` first. Upstream `develop` still has the bug. |
-| `ci` | `.github/workflows/flightsmojo_image.yml` | image tag `v4.18.0-fm2` |
+| `ci` | `.github/workflows/flightsmojo_image.yml` | image tag `v4.18.0-fm3` |
 
 **Sticky assignment (final design).** `sticky_agent_id(conversation)` in
 `AssignmentService` returns the agent who most recently sent a **public
@@ -486,13 +486,15 @@ accounts because account switch and logout are full `window.location`
 navigations; existing RSpec stays green because the conversation factory gives
 each conversation a unique sequenced email and no phone.
 
-**Shipping the fork.** Version images are built from **git tags**
+**Shipping the fork.** (`v4.18.0-fm2` was built on 22 Sep from PR #1–#3 but never
+deployed; `v4.18.0-fm3` adds the review follow-ups from PR #4 and is the
+release.) Version images are built from **git tags**
 (`flightsmojo_image.yml`: a tag matching `v*-fm*` publishes that exact image
 tag, immutable; branch pushes only refresh `flightsmojo-latest`). Path: push
 the branch → PR into `flightsmojo` (the upstream `run_foss_spec` workflow
 runs on any PR: rubocop, brakeman, eslint, vitest, rspec) → merge →
-`git tag v4.18.0-fm2 && git push origin v4.18.0-fm2` → CI publishes →
-compose pin (already `v4.18.0-fm2` in the hub repo) →
+`git tag v4.18.0-fm3 && git push origin v4.18.0-fm3` → CI publishes →
+compose pin (already `v4.18.0-fm3` in the hub repo) →
 `docker compose pull && up -d` on the server in a quiet window.
 **4.16.0 → 4.18.0 carries 25 migrations**, so rollback is *not* just
 re-pinning the old tag: take a `pg_dump` first and restore it if you roll
@@ -620,7 +622,7 @@ and needs headroom in Docker Desktop's disk limit — a full VM disk shows up as
 
 ## 13. Open threads (Aug 2026)
 
-1. **Fork release `v4.18.0-fm2`** (UI + sticky assignment + upstream 4.17.0,
+1. **Fork release `v4.18.0-fm3`** (UI + sticky assignment + upstream 4.17.0,
    4.17.1, 4.18.0 incl. their security fixes): committed on
    `feat/fm-booking-badge-inbox-counts` 22 Sep 2026, vitest green locally
    (4240 tests); **not pushed, rspec not yet run** (no Ruby 3.4 locally —

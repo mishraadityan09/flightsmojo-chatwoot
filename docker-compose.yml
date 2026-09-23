@@ -76,8 +76,11 @@ services:
       - '127.0.0.1:5432:5432'
     volumes:
       # THIS is where your data actually lives. The container is disposable;
-      # this named volume is not. Deleting it = losing all conversations.
-      - postgres_data:/var/lib/postgresql/data
+      # this folder on the host is not. Deleting it = losing all conversations.
+      # Production keeps it at a host path (not a named volume) — the server
+      # was set up that way and the 4.16 → 4.18 upgrade found the edit only on
+      # the box; it is committed here so `git pull` never fights it again.
+      - /opt/chatwoot/postgres-data:/var/lib/postgresql/data
 
   redis:
     image: redis:alpine
@@ -106,5 +109,4 @@ services:
 
 volumes:
   storage_data:
-  postgres_data:
   redis_data:

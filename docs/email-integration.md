@@ -159,6 +159,10 @@ configures Postfix as a **receive-only** relay:
   so a queue flush after an outage cannot swamp Chatwoot's web workers;
 - the `master.cf` entry is written with `postconf -M`, so re-running the
   script replaces it rather than appending a duplicate;
+- the hand-off sends `X-Forwarded-Proto: https`: **production runs
+  `FORCE_SSL=true`** (found 28 Sep during step 6 — the local health probe got
+  redirects, never 200), and Rails 301s plain HTTP on the local port. With the
+  header the request stays local (no nginx body limit) and is not redirected;
 - the hand-off script POSTs to `http://127.0.0.1:3001/rails/action_mailbox/relay/inbound_emails`
   (Chatwoot's published port; no nginx, no TLS needed) and exits **75 on any
   non-2xx**, which makes Postfix keep the message and retry.
@@ -317,6 +321,38 @@ From Microsoft's documentation on external forwarding
 
 ---
 
+## Side effects the moment SMTP works (decide before Phase 3 step 6)
+
+Found 28 Sep 2026 in the fork. Today no email leaves Chatwoot because
+`SMTP_ADDRESS` is blank; after the recreate two **existing** features start
+sending on their own, independent of the new email inboxes:
+
+1. **Web-chat email continuity** (`Channel::WebWidget#continuity_via_email`,
+   default **true** on every website inbox). After any outgoing, non-private
+   message — **agent or bot** — in a website conversation whose contact has an
+   email, `Messages::SendEmailNotificationService` schedules
+   `ConversationReplyEmailJob` **2 minutes later**; `reply_with_summary` sends
+   only if the visitor has not viewed the conversation since
+   (`conversation_already_viewed?`), with the last 10 earlier messages plus
+   the new ones, From `MAILER_SENDER_EMAIL`, Reply-To
+   `reply+<uuid>@inbound.flightsmojo.com` — so the visitor can answer by email
+   and it threads back into the chat. Switch per inbox: Settings → Inboxes →
+   (website inbox) → Settings → *Enable conversation continuity via email*.
+   WhatsApp inboxes are not affected (only WebWidget and API channels).
+   **Done 28 Sep 2026: switched OFF on all five website inboxes** (India,
+   UAE, US, UK, Indonesia) before SMTP was enabled; turn back on deliberately
+   once email is live and tested. (India's widget also has the email collect
+   box on, so many contacts carry an email address.)
+2. **Agent assignment emails.** Every account user is created with
+   `email_conversation_assignment` on (`AccountUser#create_notification_setting`),
+   so each agent gets an email whenever a conversation is assigned to them —
+   at ~600 conversations/day across 19 users that is roughly 30 emails per
+   agent per day. Each agent can switch it off under Profile Settings →
+   Notifications.
+
+Also newly working: password-reset and invite emails, and the inbox
+reconnect / webhook-failure alerts to admins.
+
 ## Risks and limits worth knowing
 
 - **Postfix is a new service on a small (3.8 GB) box** that has had one
@@ -405,7 +441,10 @@ configs, commands, test scripts and docs; "admin" = the Microsoft 365 admin.
   Super Admin value → env, and a Super Admin value saved as an empty string
   wins over the env and yields addresses like `abc123@` with no domain.
   After creating the inbox, its forwarding address **must** end in
-  `@inbound.flightsmojo.com`.
+  `@inbound.flightsmojo.com`. Saving that Super Admin page with the two
+  email-limit fields blank is safe: `AccountEmailRateLimitable` returns early
+  unless `ChatwootApp.chatwoot_cloud?`, and the plan-limit reader is
+  enterprise-only code, which our CE image does not ship.
 - **Rollback:** revert `.env` + `compose up -d --no-deps rails sidekiq`; stop Postfix; instance type
   back with another stop/start; snapshot restore as last resort.
 - **Gate:** relay reachable from the internet end-to-end; SES sending works.

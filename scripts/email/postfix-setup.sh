@@ -79,9 +79,9 @@ ss -ltn | grep -q ':25 ' && echo "postfix listening on port 25" || { echo "port 
 echo "== 6/6 self-test"
 MSG=$(printf 'From: Self Test <selftest@example.com>\nTo: selftest@%s\nSubject: postfix self-test %s\nMessage-ID: <selftest-%s@%s>\nDate: %s\n\nIf you can read this in the Postfix log as status=sent, the hand-off works.\n' \
   "$INBOUND_DOMAIN" "$(date +%s)" "$(date +%s)" "$MAIL_HOSTNAME" "$(date -R)")
-code=$(printf '%s' "$MSG" | curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -u "actionmailbox:$PASS" \
+code=$(printf '%s' "$MSG" | curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "X-Forwarded-Proto: https" -u "actionmailbox:$PASS" \
   -H "Content-Type: message/rfc822" --data-binary @- "$INGRESS_URL" || echo 000)
-echo "direct POST to Chatwoot -> HTTP $code (204 = good; 401 = password mismatch, recreate rails; 301/308 = FORCE_SSL on, set INGRESS_URL to the https URL; 000 = rails not reachable)"
+echo "direct POST to Chatwoot -> HTTP $code (204 = good; 401 = password mismatch, recreate rails; 301 = FORCE_SSL redirect not bypassed; 000 = rails not reachable)"
 printf '%s' "$MSG" | sendmail -f selftest@example.com "selftest@$INBOUND_DOMAIN"
 sleep 4
 echo "-- queue (empty = delivered):"; postqueue -p | tail -3

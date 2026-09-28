@@ -17,5 +17,5 @@ echo "== postfix"; command -v systemctl >/dev/null && systemctl is-active postfi
 echo "queued messages: $(postqueue -p 2>/dev/null | grep -c '^[0-9A-F]')"
 echo "== chatwoot relay endpoint (expect 204)"
 [ -n "$PASS" ] && printf 'From: c@example.com\nTo: check@%s\nSubject: check\nMessage-ID: <check-%s@mx>\n\nok\n' "$INBOUND_DOMAIN" "$(date +%s)" | \
-  curl -sS -o /dev/null -w 'HTTP %{http_code}\n' -u "actionmailbox:$PASS" -H 'Content-Type: message/rfc822' --data-binary @- "$URL"
+  curl -sS -o /dev/null -w 'HTTP %{http_code}\n' -H 'X-Forwarded-Proto: https' -u "actionmailbox:$PASS" -H 'Content-Type: message/rfc822' --data-binary @- "$URL"
 echo "== last postfix events"; journalctl --since '1 hour ago' --no-pager 2>/dev/null | grep postfix | grep -E 'status=|reject|warning' | tail -8

@@ -17,7 +17,12 @@ if [ ! -r "$CONF" ]; then
 fi
 . "$CONF"
 
+# X-Forwarded-Proto: production runs FORCE_SSL=true, and Rails answers plain
+# HTTP on the local port with a 301 to https. Declaring the request as HTTPS
+# (exactly what nginx does for every public request) avoids the redirect while
+# keeping the POST local: no nginx body-size limit, no TLS hop.
 code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 \
+  -H "X-Forwarded-Proto: https" \
   -u "actionmailbox:$INGRESS_PASSWORD" \
   -A "FlightsMojo Postfix relayer" \
   -H "Content-Type: message/rfc822" \

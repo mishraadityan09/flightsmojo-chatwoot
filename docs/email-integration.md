@@ -450,6 +450,27 @@ configs, commands, test scripts and docs; "admin" = the Microsoft 365 admin.
 - **Gate:** relay reachable from the internet end-to-end; SES sending works.
 
 ### Phase 4 — pilot inbox: `care@flightsmojo.com` (UI only)
+> **Created 28 Sep 2026 12:25 IST:** inbox *FlightsMojo USA Email*
+> (`care@flightsmojo.com`, Other providers). Forwarding address:
+> **`6fd5ba48346fc3d349dd9f87e78d2017@inbound.flightsmojo.com`** — ends in
+> the inbound domain as required. `care@flightsmojo.com` was created as an
+> M365 **shared mailbox** (forwarding works on shared mailboxes, no licence
+> needed) with admin mailbox forwarding + keep-a-copy. **First real email
+> end to end 28 Sep 07:15 UTC:** Gmail → care@ → Microsoft forward (SRS
+> envelope sender, STARTTLS) → Postfix → Chatwoot `status=sent` in 0.37 s.
+> No 5.7.520 bounce, so the outbound-spam forwarding policy was not needed.
+> **Tests 28 Sep:** new mail → ticket #18398 (linked to the customer's
+> earlier web chats by email); agent reply → same Gmail thread (From
+> `noreply@` until the inbox SMTP block is filled); customer reply →
+> `reply+<uuid>@inbound…` → same ticket, quoted text folded.
+> **Blocker found:** Netcore injects "Click here to unsubscribe" plus
+> "Yes, I am interested / still interested / not interested" buttons into
+> HTML mail (Chatwoot's plain-text-free replies are HTML; a plain-text test
+> via the same relay had none). An unsubscribe click would suppress the
+> customer account-wide in Netcore (booking/OTP mail too). Fix pending on
+> Netcore Mail settings / per-domain Tracking Settings, or a dedicated
+> Netcore subaccount for support mail. **Deferred by decision 28 Sep 2026**
+> ("leave this for now"); fix before care@ goes on the website.
 - Add Inbox → Email → *Other providers*: name `USA · Email`, address
   `care@flightsmojo.com`. Collaborators; signatures; Bot = None.
 - Configure SMTP block with the SES credentials so replies come **from**
@@ -463,6 +484,34 @@ configs, commands, test scripts and docs; "admin" = the Microsoft 365 admin.
 - Run in parallel with today's handling for 2–3 days of real mail.
 - **Rollback:** admin removes the rule; mail is still in the mailbox.
 - **Gate:** all tests pass; agents have handled real tickets from it.
+
+> **28 Sep 2026, later:** inbox SMTP block filled (Netcore 587, STARTTLS,
+> verify peer, auth login; beware Chrome autofilling the Login/Password
+> fields with the admin's Chatwoot login). New-ticket test #18416 passed
+> (new mail = new ticket, reply threads, customer reply returns to it).
+> Channel greeting enabled asking for Booking ID/PNR (sent once per ticket,
+> skipped for auto-replies). Staff invites via Settings → Agents → Add Agent
+> now email a real invitation (`FRONTEND_URL=https://chat.flightsmojo.com`
+> verified); don't create agents in Super Admin → Users any more.
+
+> **Netcore delay, measured 28 Sep:** headers of reply 276039 show
+> `X-InjTime` 09:23:29 UTC (Chatwoot handed it over; worker logged "sent"
+> 09:23:31, queue wait 0 s, SMTP ~1 s) but `Date: 14:57:25 +0530` (Netcore
+> rewrote it on release), Microsoft received 09:27:26, mailbox 09:27:29.
+> Netcore held the mail ~4 min; same in Gmail and Outlook. Headers also
+> carry `X-Traffic-Type`, `List-Unsubscribe`, `Feedback-ID` — SMTP-relay
+> traffic looks treated as bulk/marketing, which would explain both the
+> delay and the injected footer (inference, not confirmed by Netcore).
+> Options: move Chatwoot sending to Amazon SES (Netcore untouched for the
+> website; recommended) or ask Netcore to treat relay mail as transactional.
+> **Decision 28 Sep 2026: keep Netcore** (SES priced at ~$5–7/month but
+> declined). Accepted consequence: ~4-minute delivery delay and the Netcore
+> footer on every Chatwoot email until Netcore changes how relay mail is
+> handled; SES stays the documented fallback.
+> **Bot detached from the email inbox (Bot Configuration = None)** after it
+> and the greeting both replied to every new ticket; greeting stays. Bot on
+> email needs an "email mode" first (chat prompt, 10-min auto-resolve
+> goodbye, quoted-text input, auto-reply handling).
 
 ### Phase 5 — go-live and rollout
 - Agent rule: reply only from Chatwoot. Cut over the US email path.

@@ -657,6 +657,15 @@ and needs headroom in Docker Desktop's disk limit — a full VM disk shows up as
 7. `bot/faq.md` still contains `[VERIFY]` values (baggage kg, ₹ fees) quoted to
    customers as fact — a business risk, not a code one.
 
+8. **Per-country email inboxes — research done 23 Sep 2026, nothing built.**
+   The Microsoft 365 admin will provide one address per country and
+   *forward* it (no logins offered), so the route is Chatwoot's forwarding
+   ingress: Postfix on the Chatwoot box as the `relay` receiver for
+   `inbound.<domain>` (SES→SNS is out: 150 KB cap bounces attachments),
+   Amazon SES for sending, one env change, DNS records from the domain
+   owner. Full write-up, options table, draft Postfix config, admin
+   questions: `docs/email-integration.md`. Internals in §16.
+
 ---
 
 ## 14. Inbound email — how a customer's reply threads back
@@ -741,3 +750,87 @@ applies the matching label (and later assigns a team). **Register `issue_type`
 as a conversation custom attribute first** (Settings → Custom Attributes),
 exactly as `booking_id` already is — an unregistered key cannot be used as a
 condition.
+
+---
+
+## 16. Email inbox channel (Microsoft 365, OAuth) — how it runs
+
+Added 23 Sep 2026 for the support-mailbox project (`docs/email-integration.md`).
+The fork carries **no changes** to mailboxes, mailers, IMAP services,
+`Channel::Email`, `features.yml` or `schedule.yml` versus upstream 4.18.0.
+
+**Inbound = IMAP polling, not ActionMailbox.** `config/schedule.yml`
+(`*/1 * * * *`) → `Inboxes::FetchImapEmailInboxesJob` → per-channel
+`Inboxes::FetchImapEmailsJob` (Redis mutex `EMAIL_CHANNEL_LOCK::<inbox>`,
+5-min TTL). Skips suspended accounts, `imap_enabled: false`, and
+`reauthorization_required?`. `Imap::MicrosoftFetchEmailService` authenticates
+XOAUTH2 with `Microsoft::RefreshOauthTokenService` (refreshes when
+`provider_config.expires_on` is within 5 min; client from
+`AZURE_APP_ID`/`AZURE_APP_SECRET` via `GlobalConfigService`, so Super Admin
+InstallationConfig works — unlike Google, whose card reads ENV directly).
+`Imap::BaseFetchEmailService`: `SINCE` today−1 day, `BODY.PEEK` (never marks
+read), `MAX_MESSAGES_PER_SYNC = 500`, dedupe on `messages.source_id` =
+Message-ID plus a 2-day Redis deleted-message tracker; mail *from*
+`MAILER_SENDER_EMAIL` is dropped; a mail failing 3× is skipped for 6 h
+(`email_failures:<message_id>`). Threading in `Imap::ImapMailbox`: In-Reply-To
+→ References (incl. `account/<id>/conversation/<uuid>@`) → new conversation.
+
+**OAuth flow.** `POST /api/v1/accounts/:id/microsoft/authorization` (admin
+only, `state` = 15-min account sgid) → Microsoft `/common` v2.0 endpoints
+(`MicrosoftConcern`; scope `offline_access IMAP.AccessAsUser.All SMTP.Send
+openid profile email`, `prompt=select_account`) → `GET /microsoft/callback`
+(`OauthCallbackController`): finds or creates `Channel::Email` by the
+id_token `email` claim, sets `imap_login` = `preferred_username`/UPN
+(upstream #14522), `outlook.office365.com:993`, stores
+access/refresh tokens in `provider_config`, calls `reauthorized!`. Redirect
+URI is `"#{FRONTEND_URL}/microsoft/callback"` — must match Azure exactly.
+Because of `/common`, a **single-tenant** Azure app fails (upstream #13043).
+Microsoft card visibility: `globalConfig.azureAppId`
+(`dashboard_controller.rb`). Super Admin group: `app_config?config=microsoft`.
+
+**Outbound.** `Message#send_reply` → `SendReplyJob` → `Email::SendOnEmailService`
+→ `ConversationReplyMailer#email_reply` (sends only if global `SMTP_ADDRESS`
+set, or `smtp_enabled`, or `imap_enabled` + provider). Transport priority in
+`conversation_reply_mailer_helper.rb`: inbox SMTP → XOAUTH2
+(`smtp.office365.com:587`, `user_name: imap_login`, password =
+**stored** `provider_config['access_token']`, not refreshed at send time) →
+global `SMTP_*`. From = `channel.email` with agent name; Reply-To =
+`channel.email` when `imap_enabled`; Message-ID
+`<conversation/<uuid>/messages/<id>@domain>`; In-Reply-To = last incoming
+`content_attributes.email.message_id`; References folded by
+`references_header_builder.rb`. Template `email_reply.html.erb` renders only
+the message (+ signature) — no quoted history. Outgoing attachments > 20 MB
+total become links; incoming keeps the last 15.
+
+**Reauthorization.** `Reauthorizable`, threshold 10 `OAuth2::Error`s →
+`prompt_reauthorization!` (Redis flag, admin `email_disconnect` mail, inbox
+event). Plain IMAP/connection errors only log. Cleared by the OAuth callback
+or any inbox update.
+
+**Gotchas that shaped the runbook:** 1-day look-back (an outage > 24 h loses
+mail); sends depend on the poll keeping the token fresh; client-secret expiry
+= silent stop; `MAILER_SENDER_EMAIL` must never equal the inbox address;
+`inbound_email_domain` falls back to literal `false` if `account.domain`,
+InstallationConfig and ENV are all unset (irrelevant for the OAuth path, which
+uses the channel's own domain); shared mailboxes cannot complete the sign-in;
+agent bots receive email `message_created` webhooks exactly like the widget.
+
+**Forwarding route (the one chosen for the per-country project).** No
+polling: mail reaches `POST /rails/action_mailbox/relay/inbound_emails`
+(`Content-Type: message/rfc822`, basic auth `actionmailbox:$RAILS_INBOUND_EMAIL_PASSWORD`;
+`config.action_mailbox.ingress` defaults to `relay`, `config/initializers/mailer.rb:50`)
+→ `ApplicationMailbox` → `ReplyMailbox` → `Mailbox::ConversationFinder`
+(receiver_uuid → in_reply_to → references → new_conversation).
+`EmailChannelFinder` matches To/Cc/X-Original-To, then Bcc, against
+`channel.email` **or** `channel.forward_to_email`
+(`<hex>@account.inbound_email_domain`, generated on create). The dashboard
+shows the forward address only when **ENV** `MAILER_INBOUND_EMAIL_DOMAIN` is
+set (`_inbox.json.jbuilder` `forwarding_enabled`), even though
+`inbound_email_domain` itself also accepts `account.domain` or
+InstallationConfig. Outbound with no IMAP/OAuth: transport = per-inbox SMTP if
+`smtp_enabled`, else global `SMTP_*`; From = `channel.email` only with
+per-inbox SMTP, otherwise `MAILER_SENDER_EMAIL`; Reply-To =
+`reply+<uuid>@inbound_email_domain` in both cases. SES ingress
+(`RAILS_INBOUND_EMAIL_SERVICE=ses`, `ACTION_MAILBOX_SES_SNS_TOPIC`) is wired
+for the SNS action only — AWS caps that at 150 KB per email and bounces the
+rest, which is why the project uses Postfix `relay` instead.

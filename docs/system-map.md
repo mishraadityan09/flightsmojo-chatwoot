@@ -291,6 +291,8 @@ auto-resolve timers, by design.
 
 ## 9. Our fork modifications
 
+> Ledger of every change + upgrade playbook: [`chatwoot-fork-changes.md`](chatwoot-fork-changes.md).
+
 **On branch `flightsmojo` (what prod runs, `v4.16.0-fm1`):** branding only
 (logos, favicons, installation defaults, no widget footer) +
 `.github/workflows/flightsmojo_image.yml` (CE build → GHCR). **The CI strips
@@ -503,6 +505,14 @@ back. **The rails entrypoint does not migrate** — run
 `pull` and before `up -d`. All 25 are additive (new columns / tables /
 indexes plus two `ai_assignee_type` backfills), so the old image still runs
 against the migrated schema if a code-only rollback is ever needed.
+
+### Change ledger, UI upgrade progress, upgrade checks
+
+Every fork change (FM-01…) with its files, blast radius, upstream churn and
+what to re-check on a Chatwoot upgrade — plus the UI-upgrade progress
+tracker (`feat/fm-ui-upgrade` → `v4.18.0-fm4`) — lives in
+[`chatwoot-fork-changes.md`](chatwoot-fork-changes.md). Read it before
+merging an upstream tag; update it with every fork commit.
 
 ---
 

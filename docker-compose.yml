@@ -106,6 +106,14 @@ services:
     ports:
       # localhost-only, handy for curl debugging (rails reaches it as bot:3002)
       - '127.0.0.1:3002:3002'
+    networks:
+      default:
+        aliases:
+          # Dotted name for the account webhook (Settings → Integrations →
+          # Webhooks → http://bot.flightsmojo.internal:3002/intent): the
+          # dashboard's URL validator rejects a bare "bot" host. Rails
+          # resolves it on the compose network exactly like "bot".
+          - bot.flightsmojo.internal
 
 volumes:
   storage_data:

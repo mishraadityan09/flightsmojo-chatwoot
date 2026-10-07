@@ -15,6 +15,9 @@
 import express from "express";
 import crypto from "node:crypto";
 import { buildSystemPrompt } from "./prompt.js";
+import { TRANSFER_TOOL, parseTransfer, customerMessage, agentNote } from "./handoff.js";
+import { parseInboxCountries, parseCancellationPhones, marketFor, phoneFor } from "./markets.js";
+import { shouldCheck, classifierInput, classify, hasFirstReply } from "./intent.js";
 
 // Lesson: config & secrets come from the environment (.env via compose),
 // never from code.
@@ -50,6 +53,19 @@ const {
   // (human) conversations, never "pending" (bot) ones — so quiet bot chats
   // would pile up forever without this.
   AUTO_RESOLVE_MINUTES = "10",
+  // ── Cancellation routing (2026-10-07). Everything below is OFF until set. ──
+  // The team that owns cancellations/reschedules (Settings → Teams → the id
+  // in the URL). With it set, and a market switched on in CANCELLATION_PHONES
+  // (markets.js), a cancellation handoff from the chat bot — and a
+  // cancellation the intent checker finds on the other channels — goes to
+  // this team, and the customer gets that market's number. Markets that are
+  // not switched on stay plain handoffs.
+  CANCELLATION_TEAM_ID,
+  // Optional label added when routing (must exist in Settings → Labels).
+  CANCELLATION_LABEL,
+  // Secret of the ACCOUNT webhook that feeds /intent (Settings → Integrations
+  // → Webhooks). Unset = the intent checker is off; /intent just says 200.
+  CHATWOOT_WEBHOOK_SECRET,
   PORT = 3002,
 } = process.env;
 
@@ -66,11 +82,30 @@ function systemPromptFor(inboxId) {
   return promptCache.get(key);
 }
 
+// Inbox → market map; doubles as the intent checker's watch list. Which
+// markets are switched ON — and the number each quotes — is CANCELLATION_PHONES
+// (markets.js). Routing needs a team and at least one market on; the checker
+// also needs the webhook secret and at least one watched inbox.
+const INBOX_COUNTRIES = parseInboxCountries(process.env.INBOX_COUNTRIES);
+const CANCELLATION_PHONES = parseCancellationPhones(process.env.CANCELLATION_PHONES);
+const ROUTING_ENABLED =
+  /^\d+$/.test(String(CANCELLATION_TEAM_ID || "")) && Object.keys(CANCELLATION_PHONES).length > 0;
+const INTENT_ENABLED =
+  ROUTING_ENABLED && Boolean(CHATWOOT_WEBHOOK_SECRET) && Object.keys(INBOX_COUNTRIES).length > 0;
+const CLASSIFIER_CONFIG = {
+  provider: BOT_PROVIDER,
+  openaiKey: OPENAI_API_KEY,
+  openaiModel: OPENAI_MODEL,
+  geminiKey: GEMINI_API_KEY,
+  geminiModel: GEMINI_MODEL,
+};
+
 const app = express();
 // Keep the RAW request bytes alongside the parsed JSON: the webhook signature
 // is an HMAC over the exact bytes Chatwoot sent — re-stringifying the parsed
-// object would not round-trip byte-for-byte.
-app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+// object would not round-trip byte-for-byte. 1 MB because the account
+// webhook now carries emails too (long quoted threads).
+app.use(express.json({ limit: "1mb", verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -85,6 +120,12 @@ const SIGNATURE_MAX_AGE_SECONDS = 5 * 60;
 
 function isFromChatwoot(req) {
   if (!CHATWOOT_BOT_HMAC_SECRET) return true; // unset = open; warned at boot
+  return signedWith(req, CHATWOOT_BOT_HMAC_SECRET);
+}
+
+// Account webhooks (the intent checker's feed) carry their own secret but use
+// the very same signature scheme.
+function signedWith(req, secret) {
   const ts = req.get("x-chatwoot-timestamp") || "";
   const sig = req.get("x-chatwoot-signature") || "";
   const age = Math.abs(Date.now() / 1000 - Number(ts));
@@ -92,7 +133,7 @@ function isFromChatwoot(req) {
   const expected =
     "sha256=" +
     crypto
-      .createHmac("sha256", CHATWOOT_BOT_HMAC_SECRET)
+      .createHmac("sha256", secret)
       .update(`${ts}.`)
       .update(req.rawBody ?? "")
       .digest("hex");
@@ -149,7 +190,7 @@ app.post("/webhook", (req, res) => {
   ) {
     muteBot(conversationId);
     cancelAutoResolve(conversationId);
-    histories.delete(conversationId);
+    forget(conversationId);
     console.log(`[conv ${conversationId}] human agent replied — bot muted`);
     if (event.conversation?.status === "pending") {
       handoffToHuman(conversationId).catch((e) =>
@@ -174,12 +215,116 @@ app.post("/webhook", (req, res) => {
   });
 });
 
+// ── Intent checker feed ──
+// An ACCOUNT webhook (Settings → Integrations → Webhooks, event "message
+// created", URL http://bot.flightsmojo.internal:3002/intent) delivers every
+// message of the account here — email, website tickets, WhatsApp, and chats
+// the humans already own. shouldCheck() keeps only customer messages on
+// watched inboxes, in markets switched on in CANCELLATION_PHONES, that no
+// agent has replied to or routed yet; those get one small classification
+// call, and only a clear cancellation changes anything.
+app.post("/intent", (req, res) => {
+  if (!INTENT_ENABLED) return res.sendStatus(200); // configured off: acknowledge, do nothing
+  if (!signedWith(req, CHATWOOT_WEBHOOK_SECRET)) {
+    console.warn("intent webhook rejected: missing/invalid Chatwoot signature");
+    return res.sendStatus(401);
+  }
+  res.sendStatus(200);
+  checkIntent(req.body).catch((err) => console.error("intent checker error:", err));
+});
+
+async function checkIntent(event) {
+  const check = shouldCheck(event, { inboxCountries: INBOX_COUNTRIES, phones: CANCELLATION_PHONES });
+  if (!check.ok) return;
+  const conversationId = event.conversation.id;
+  if (routingState.has(conversationId)) return; // being classified, or routed already
+  rememberRouting(conversationId, "checking");
+  try {
+    const verdict = await classify(classifierInput(event), CLASSIFIER_CONFIG);
+    console.log(
+      `[conv ${conversationId}] intent: ${verdict.intent}${verdict.summary ? ` — ${verdict.summary}` : ""}`,
+    );
+    if (verdict.intent !== "cancellation") {
+      routingState.delete(conversationId); // the next message gets a fresh look
+      return;
+    }
+    // The webhook payload is a snapshot: an agent may have replied or routed
+    // while the model was thinking. Look again before touching anything.
+    const live = await chatwootGet(`/conversations/${conversationId}`);
+    if (live?.meta?.team || hasFirstReply(live)) {
+      routingState.delete(conversationId);
+      return;
+    }
+    if (!(await routeToCancellations(conversationId))) {
+      routingState.delete(conversationId);
+      return; // nothing is said to the customer — the chat is exactly as it was
+    }
+    const conv = event.conversation;
+    await postNote(
+      conversationId,
+      agentNote({
+        source: "checker",
+        reason: "cancellation",
+        summary: verdict.summary,
+        channel: conv.channel,
+        routed: true,
+      }),
+    );
+    await postReply(
+      conversationId,
+      customerMessage({
+        reason: "cancellation",
+        routed: true,
+        phone: cancellationPhone(conv),
+        channel: conv.channel,
+      }),
+    );
+  } catch (err) {
+    routingState.delete(conversationId);
+    throw err;
+  }
+}
+
 // Lesson (learned the hard way, via a 401): the bot's token may POST replies
 // and change conversation status, but may NOT read message history. So the
 // bot keeps its own short-term memory per conversation, in RAM. A restart
 // forgets mid-conversation context — acceptable for v1; the customer's next
 // message simply starts fresh.
 const histories = new Map(); // conversationId -> [{ role, parts }]
+
+// What the booking tool learned in this conversation — feeds the agent's
+// handoff note ("Booking ID 221324 (verified by lookup)"). RAM, like histories.
+const lookups = new Map(); // conversationId -> { email, bookingId, pnr, outcome }
+
+function recordLookup(conversationId, args = {}, result) {
+  if (!conversationId) return;
+  let outcome = "unavailable";
+  if (lookupSucceeded(result)) outcome = "found";
+  else if (result?.found === false) outcome = "not found";
+  else if (/payment/i.test(String(result?.error || ""))) outcome = "payment needs a human check";
+  lookups.set(conversationId, {
+    email: String(args.email || "").trim() || undefined,
+    bookingId: args.bookingId ? String(args.bookingId) : undefined,
+    pnr: String(args.pnr || "").trim() || undefined,
+    outcome,
+  });
+}
+
+/** A closed chapter — humans own it, or it was resolved. */
+function forget(conversationId) {
+  histories.delete(conversationId);
+  lookups.delete(conversationId);
+}
+
+// Routing bookkeeping shared by the chat bot and the intent checker:
+// conversations being classified or already routed, so two quick messages
+// never route (and phone) the same customer twice. Bounded, in RAM.
+const routingState = new Map(); // conversationId -> "checking" | "routed"
+
+function rememberRouting(conversationId, state) {
+  if (routingState.size > 1000) routingState.delete(routingState.keys().next().value);
+  routingState.set(conversationId, state);
+}
 
 function remember(conversationId, role, text) {
   const history = histories.get(conversationId) ?? [];
@@ -249,7 +394,7 @@ function scheduleAutoResolve(conversationId) {
     // Last-moment guard: a human takeover in the final seconds mutes the
     // conversation before the status-change webhook lands.
     if (isMuted(conversationId)) return;
-    histories.delete(conversationId); // closed chapter; a return starts fresh
+    forget(conversationId); // closed chapter; a return starts fresh
     try {
       await postReply(conversationId, AUTO_RESOLVE_GOODBYE);
       await chatwootPost(`/conversations/${conversationId}/toggle_status`, { status: "resolved" });
@@ -263,23 +408,24 @@ function scheduleAutoResolve(conversationId) {
 
 // One seam, two providers. History is stored Gemini-style; askOpenAI converts.
 // conversationId is threaded so the booking tool can persist what it looked up.
-function askLLM(history, systemPrompt, conversationId) {
-  return BOT_PROVIDER === "openai"
-    ? askOpenAI(history, systemPrompt, conversationId)
-    : askGemini(history, systemPrompt, conversationId);
+// Resolves to { text } (post it) or { handoff: { reason, summary } } (the
+// model called transfer_to_human).
+async function askLLM(history, systemPrompt, conversationId) {
+  const outcome =
+    BOT_PROVIDER === "openai"
+      ? await askOpenAI(history, systemPrompt, conversationId)
+      : await askGemini(history, systemPrompt, conversationId);
+  // Belt and braces: a model that types the old HANDOFF word instead of
+  // calling the tool still hands off — as "other", with nothing to summarise.
+  if (outcome.text && outcome.text.includes("HANDOFF")) {
+    return { handoff: parseTransfer({ reason: "other", summary: "" }) };
+  }
+  return outcome;
 }
 
 async function handleCustomerMessage(event) {
   const conversationId = event.conversation.id;
   console.log(`[conv ${conversationId}] customer: ${event.content}`);
-
-  // Deterministic guardrail: an explicit ask for a human must never depend on
-  // the LLM noticing — divert straight away, before any model call.
-  if (WANTS_HUMAN_RE.test(event.content || "")) {
-    console.log(`[conv ${conversationId}] explicit human request — diverting`);
-    await connectToHuman(conversationId);
-    return;
-  }
 
   // What we ALREADY know about this customer — from the pre-chat form (email
   // → contact record) and prior lookups (booking_id → conversation attribute).
@@ -311,6 +457,19 @@ async function handleCustomerMessage(event) {
   const firstWord = knownName ? String(knownName).trim().split(/\s+/)[0] : "";
   const firstName = firstWord.replace(/[^\p{L}'-]/gu, "").slice(0, 30) || null;
   console.log(`[conv ${conversationId}] known: email=${knownEmail ? "yes" : "no"} booking_id=${knownBookingId || "-"} name=${firstName || "-"}`);
+  // Everything a handoff needs, whichever path takes the chat to a human.
+  const ctx = { conv, knownEmail, knownBookingId };
+
+  // Deterministic guardrail: an explicit ask for a human must never depend on
+  // the LLM noticing — divert straight away, before any model call.
+  if (WANTS_HUMAN_RE.test(event.content || "")) {
+    console.log(`[conv ${conversationId}] explicit human request — diverting`);
+    await connectToHuman(conversationId, ctx, {
+      reason: "other",
+      summary: `Customer asked for a human: "${snippet(event.content)}"`,
+    });
+    return;
+  }
 
   let systemPrompt = systemPromptFor(conv.inbox_id);
   const known = [];
@@ -325,7 +484,7 @@ async function handleCustomerMessage(event) {
   // working instead of silence (which makes them re-type). Best-effort.
   typingOn(conversationId);
   const history = remember(conversationId, "user", event.content);
-  const reply = await askLLM([...history], systemPrompt, conversationId);
+  const outcome = await askLLM([...history], systemPrompt, conversationId);
   typingOff(conversationId);
   // Race fix: a human may have replied during the seconds the model spent
   // thinking — the mute was set, but this in-flight reply would still land
@@ -334,16 +493,19 @@ async function handleCustomerMessage(event) {
     console.log(`[conv ${conversationId}] human took over mid-reply — dropping bot reply`);
     return;
   }
-  console.log(`[conv ${conversationId}] bot: ${reply}`);
 
-  if (reply.trim() === "HANDOFF" || reply.includes("HANDOFF")) {
-    await connectToHuman(conversationId);
+  if (outcome.handoff) {
+    console.log(`[conv ${conversationId}] transfer (${outcome.handoff.reason}): ${outcome.handoff.summary}`);
+    await connectToHuman(conversationId, ctx, outcome.handoff);
   } else {
-    remember(conversationId, "model", reply);
-    await postReply(conversationId, reply);
+    console.log(`[conv ${conversationId}] bot: ${outcome.text}`);
+    remember(conversationId, "model", outcome.text);
+    await postReply(conversationId, outcome.text);
     scheduleAutoResolve(conversationId); // silence from here = satisfied
   }
 }
+
+const snippet = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
 
 // Phrases that mean "I want a person" — conservative on purpose ("agent"
 // alone would misfire on "travel agent"); the prompt's handoff rule catches
@@ -356,17 +518,86 @@ const WANTS_HUMAN_RE =
 // cannot smuggle a sentence of instructions).
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/** The number a customer in this conversation's market is given, or null when
+ *  cancellation routing is switched off for that market (CANCELLATION_PHONES)
+ *  or the inbox is not in INBOX_COUNTRIES. */
+function cancellationPhone(conv) {
+  return phoneFor(marketFor(conv, INBOX_COUNTRIES), CANCELLATION_PHONES);
+}
+
 /** The full "a human takes over" sequence: mute FIRST (a fast follow-up
- *  message can still carry a stale "pending" status), then tell the customer,
- *  then flip the status so the chat lands in the human queue. */
-async function connectToHuman(conversationId) {
+ *  message can still carry a stale "pending" status), route it if it is a
+ *  cancellation in a market that is switched on, brief the agent, tell the
+ *  customer, then flip the status so the chat lands in the human queue. */
+async function connectToHuman(conversationId, ctx, handoff) {
   muteBot(conversationId);
-  histories.delete(conversationId); // humans own it now
-  await postReply(
+  const facts = lookups.get(conversationId) || {};
+  forget(conversationId); // humans own it now
+  const conv = ctx.conv || {};
+  const cancellation = handoff.reason === "cancellation";
+  // No number = routing is off for this market (or everywhere): plain handoff.
+  const phone = cancellation && ROUTING_ENABLED ? cancellationPhone(conv) : null;
+  const routed = Boolean(phone) && (await routeToCancellations(conversationId));
+  await postNote(
     conversationId,
-    "Let me connect you with one of our travel experts — a human teammate will be with you shortly. 🙋",
+    agentNote({
+      source: "bot",
+      reason: handoff.reason,
+      summary: handoff.summary,
+      channel: conv.channel,
+      email: ctx.knownEmail || facts.email,
+      bookingId: ctx.knownBookingId || facts.bookingId,
+      pnr: facts.pnr,
+      lookup: facts.outcome,
+      routed,
+      routingOff: cancellation && !phone,
+    }),
   );
+  await postReply(conversationId, customerMessage({ reason: handoff.reason, routed, phone, channel: conv.channel }));
   await handoffToHuman(conversationId);
+}
+
+// Shared by the chat bot and the intent checker. Team first — when the team
+// allows auto-assign, Chatwoot picks one of its members on the spot — then
+// the optional label. Returns true only when the team really got set, so
+// nobody tells the customer "passed to the cancellations team" unless it was.
+async function routeToCancellations(conversationId) {
+  try {
+    await chatwootPost(`/conversations/${conversationId}/assignments`, {
+      team_id: Number(CANCELLATION_TEAM_ID),
+    });
+  } catch (e) {
+    console.error(`[conv ${conversationId}] team assignment failed: ${e.message}`);
+    return false;
+  }
+  rememberRouting(conversationId, "routed");
+  console.log(`[conv ${conversationId}] routed to cancellations team ${CANCELLATION_TEAM_ID}`);
+  if (CANCELLATION_LABEL) await addLabel(conversationId, CANCELLATION_LABEL);
+  return true;
+}
+
+// The labels endpoint REPLACES the list, so read it first and send the union.
+async function addLabel(conversationId, label) {
+  try {
+    const current = (await chatwootGet(`/conversations/${conversationId}/labels`))?.payload || [];
+    if (current.includes(label)) return;
+    await chatwootPost(`/conversations/${conversationId}/labels`, { labels: [...current, label] });
+  } catch (e) {
+    console.error(`[conv ${conversationId}] label "${label}" failed (non-fatal): ${e.message}`);
+  }
+}
+
+/** Private note — agents only. Best-effort: never blocks the customer's message. */
+async function postNote(conversationId, content) {
+  try {
+    await chatwootPost(`/conversations/${conversationId}/messages`, {
+      content,
+      message_type: "outgoing",
+      private: true,
+    });
+  } catch (e) {
+    console.error(`[conv ${conversationId}] private note failed (non-fatal): ${e.message}`);
+  }
 }
 
 // ── Chatwoot API (lesson 3a: authenticated REST calls) ──
@@ -399,6 +630,16 @@ async function chatwootPost(path, payload) {
     );
   }
   return res;
+}
+
+async function chatwootGet(path) {
+  const res = await fetch(chatwootUrl(path), { headers: chatwootHeaders });
+  if (!res.ok) {
+    throw new Error(
+      `Chatwoot API ${res.status} on ${path}: ${(await res.text()).slice(0, 200)}`,
+    );
+  }
+  return res.json();
 }
 
 function postReply(conversationId, content) {
@@ -459,27 +700,36 @@ function lookupSucceeded(result) {
 const { BOOKING_API_URL, BOOKING_API_KEY } = process.env;
 const BOOKING_TOOL_ENABLED = Boolean(BOOKING_API_URL && BOOKING_API_KEY);
 
-const GEMINI_TOOLS = [
-  {
-    function_declarations: [
-      {
-        name: "get_booking_status",
-        description:
-          "Look up a FlightsMojo booking's status, flights, and payment state. " +
-          "Requires the customer's email AND at least one of: PNR, bookingId.",
-        parameters: {
-          type: "object",
-          properties: {
-            email: { type: "string", description: "Email used on the booking (mandatory)" },
-            pnr: { type: "string", description: "Airline PNR, e.g. M22W8V" },
-            bookingId: { type: "integer", description: "FlightsMojo booking id" },
-          },
-          required: ["email"],
-        },
-      },
-    ],
+const BOOKING_TOOL = {
+  name: "get_booking_status",
+  description:
+    "Look up a FlightsMojo booking's status, flights, and payment state. " +
+    "Requires the customer's email AND at least one of: PNR, bookingId.",
+  parameters: {
+    type: "object",
+    properties: {
+      email: { type: "string", description: "Email used on the booking (mandatory)" },
+      pnr: { type: "string", description: "Airline PNR, e.g. M22W8V" },
+      bookingId: { type: "integer", description: "FlightsMojo booking id" },
+    },
+    required: ["email"],
   },
-];
+};
+
+// The transfer tool is always on; the booking tool only with a configured API.
+const TOOL_SET = BOOKING_TOOL_ENABLED ? [TRANSFER_TOOL, BOOKING_TOOL] : [TRANSFER_TOOL];
+const GEMINI_TOOLS = [{ function_declarations: TOOL_SET }];
+// Responses-API shape: flat, not nested under "function".
+const OPENAI_TOOLS = TOOL_SET.map((tool) => ({ type: "function", ...tool }));
+
+// Runs the lookup, keeps what it learned for the handoff note, and stamps the
+// booking id on the conversation once it is verified.
+async function runBookingTool(conversationId, args = {}) {
+  const result = await executeBookingLookup(args);
+  recordLookup(conversationId, args, result);
+  if (args?.bookingId && lookupSucceeded(result)) stampBookingId(conversationId, args.bookingId);
+  return result;
+}
 
 async function executeBookingLookup(args = {}) {
   const email = String(args.email || "").trim();
@@ -549,8 +799,8 @@ async function askGemini(history, systemPrompt, conversationId) {
       system_instruction: { parts: [{ text: systemPrompt }] },
       contents,
       generationConfig: { temperature: 0.3, maxOutputTokens: 1024 },
+      tools: GEMINI_TOOLS,
     };
-    if (BOOKING_TOOL_ENABLED) body.tools = GEMINI_TOOLS;
 
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
@@ -567,32 +817,31 @@ async function askGemini(history, systemPrompt, conversationId) {
     const content = json.candidates?.[0]?.content;
     if (!content) throw new Error("Gemini returned no content");
 
-    const fcPart = (content.parts || []).find((p) => p.functionCall);
-    if (!fcPart) {
+    const calls = (content.parts || []).filter((p) => p.functionCall);
+    if (!calls.length) {
       const text = (content.parts || []).map((p) => p.text || "").join("");
       if (!text) throw new Error("Gemini returned an empty reply");
-      return text;
+      return { text };
     }
 
     // Echo the model turn verbatim (keeps functionCall id + thoughtSignature
-    // intact — required by the API), then append our tool result.
-    const result = await executeBookingLookup(fcPart.functionCall.args);
-    if (fcPart.functionCall.args?.bookingId && lookupSucceeded(result)) {
-      stampBookingId(conversationId, fcPart.functionCall.args.bookingId);
-    }
+    // intact — required by the API), then append our tool results.
     contents.push(content);
-    contents.push({
-      role: "user",
-      parts: [
-        {
-          functionResponse: {
-            name: fcPart.functionCall.name,
-            id: fcPart.functionCall.id,
-            response: result,
-          },
-        },
-      ],
-    });
+    const responses = [];
+    let transfer = null;
+    for (const { functionCall } of calls) {
+      if (functionCall.name === TRANSFER_TOOL.name) {
+        transfer = parseTransfer(functionCall.args);
+        continue;
+      }
+      const result = await runBookingTool(conversationId, functionCall.args);
+      responses.push({
+        functionResponse: { name: functionCall.name, id: functionCall.id, response: result },
+      });
+    }
+    // A transfer ends the turn: the system speaks to the customer from here.
+    if (transfer) return { handoff: transfer };
+    contents.push({ role: "user", parts: responses });
   }
   throw new Error("Tool loop exceeded max rounds");
 }
@@ -608,26 +857,6 @@ async function askGemini(history, systemPrompt, conversationId) {
 // is ~2.5k tokens and byte-stable per inbox (promptCache above), so it
 // qualifies as long as nothing dynamic is prepended. The usage log below
 // prints cached_tokens so you can watch it kick in from the second call.
-
-const OPENAI_TOOLS = [
-  // Responses-API shape: flat, not nested under "function".
-  {
-    type: "function",
-    name: "get_booking_status",
-    description:
-      "Look up a FlightsMojo booking's status, flights, and payment state. " +
-      "Requires the customer's email AND at least one of: PNR, bookingId.",
-    parameters: {
-      type: "object",
-      properties: {
-        email: { type: "string", description: "Email used on the booking (mandatory)" },
-        pnr: { type: "string", description: "Airline PNR, e.g. M22W8V" },
-        bookingId: { type: "integer", description: "FlightsMojo booking id" },
-      },
-      required: ["email"],
-    },
-  },
-];
 
 // Stored history is Gemini-shaped ({role: user|model, parts:[{text}]}) and
 // only ever contains plain text (tool rounds stay local to each ask* call).
@@ -654,8 +883,8 @@ async function askOpenAI(history, systemPrompt, conversationId) {
       max_output_tokens: 1024,
       reasoning: { effort: OPENAI_REASONING_EFFORT },
       store: false, // don't retain conversations on OpenAI's side
+      tools: OPENAI_TOOLS,
     };
-    if (BOOKING_TOOL_ENABLED) body.tools = OPENAI_TOOLS;
 
     const res = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -679,11 +908,15 @@ async function askOpenAI(history, systemPrompt, conversationId) {
 
     const calls = (json.output || []).filter((o) => o.type === "function_call");
     if (calls.length) {
+      let transfer = null;
       for (const call of calls) {
         let args = {};
         try { args = JSON.parse(call.arguments || "{}"); } catch {}
-        const result = await executeBookingLookup(args);
-        if (args?.bookingId && lookupSucceeded(result)) stampBookingId(conversationId, args.bookingId);
+        if (call.name === TRANSFER_TOOL.name) {
+          transfer = parseTransfer(args);
+          continue;
+        }
+        const result = await runBookingTool(conversationId, args);
         input.push({
           type: "function_call",
           call_id: call.call_id,
@@ -696,6 +929,8 @@ async function askOpenAI(history, systemPrompt, conversationId) {
           output: JSON.stringify(result),
         });
       }
+      // A transfer ends the turn: the system speaks to the customer from here.
+      if (transfer) return { handoff: transfer };
       continue;
     }
 
@@ -708,7 +943,7 @@ async function askOpenAI(history, systemPrompt, conversationId) {
         .map((c) => c.text)
         .join("");
     if (!text || !text.trim()) throw new Error("OpenAI returned an empty reply");
-    return text.trim();
+    return { text: text.trim() };
   }
   throw new Error("Tool loop exceeded max rounds");
 }
@@ -726,5 +961,19 @@ app.listen(PORT, () => {
     AUTO_RESOLVE_MS
       ? `auto-resolve: ON — quiet bot chats resolve after ${AUTO_RESOLVE_MINUTES} min`
       : "auto-resolve: off (set AUTO_RESOLVE_MINUTES to enable)",
+  );
+  const watched = Object.keys(INBOX_COUNTRIES);
+  const marketsOn = Object.keys(CANCELLATION_PHONES);
+  console.log(
+    ROUTING_ENABLED
+      ? `cancellation routing: ON for ${marketsOn.join(", ")} — team ${CANCELLATION_TEAM_ID}` +
+          (CANCELLATION_LABEL ? `, label "${CANCELLATION_LABEL}"` : "") +
+          `; inbox → market map for ${watched.join(", ") || "(none)"}`
+      : "cancellation routing: off (set CANCELLATION_TEAM_ID and CANCELLATION_PHONES to enable)",
+  );
+  console.log(
+    INTENT_ENABLED
+      ? `intent checker: ON — watching inboxes ${watched.join(", ")} via /intent, acting only for ${marketsOn.join(", ")}`
+      : "intent checker: off (needs CANCELLATION_TEAM_ID, CANCELLATION_PHONES, CHATWOOT_WEBHOOK_SECRET and INBOX_COUNTRIES)",
   );
 });

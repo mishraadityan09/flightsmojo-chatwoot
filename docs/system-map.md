@@ -274,8 +274,11 @@ auto-resolve timers, by design.
 | Booking id persistence | `stampBookingId()` writes the conversation custom attribute **only after a successful lookup** (`lookupSucceeded`) |
 | Input hygiene | inbound `booking_id` must be `^\d{1,10}$`; emails must match a strict no-space regex; name reduced to letters/`'`/`-`, capped 30 chars |
 | Auto-resolve | 10 quiet minutes (`AUTO_RESOLVE_MINUTES`, `0` disables) → fixed goodbye message → `toggle_status: resolved`. Cancelled by customer message, human reply, or status leaving `pending` |
-| Handoff | `HANDOFF` token from the LLM, or `WANTS_HUMAN_RE` regex **before** any model call |
+| Handoff | The model calls the `transfer_to_human` tool (`bot/handoff.js`: `reason` = `cancellation` \| `other`, one-line `summary`), or `WANTS_HUMAN_RE` regex **before** any model call. A literal `HANDOFF` in text still works as a fallback. Every handoff: private note for the agent (`agentNote`) → fixed customer line (`customerMessage`) → `toggle_status: open` |
+| Cancellation routing (2026-10-07) | **Per-market switch** `CANCELLATION_PHONES` (JSON, `{"IN":"00911246932002"}`): a market listed there is ON, every other market is a plain handoff (generic line, note says "routing is switched off for this market"). `reason: cancellation` on an ON market + `CANCELLATION_TEAM_ID` → `POST /assignments {team_id}` **before** the status flip (Chatwoot picks a team member when the team allows auto-assign), optional `CANCELLATION_LABEL` (labels endpoint *replaces* the list, so index → union → create), then the customer line carries that market's number (`bot/markets.js`: `INBOX_COUNTRIES` inbox → market; `"*"` = the ticket's `country` attribute). Returns false → generic line, never a false "passed to the team". Go-live 2026-10-07: India only; the model never learns about markets or numbers |
+| Intent checker (2026-10-07) | `POST /intent` fed by an **account webhook** (`message_created`, URL `http://bot.flightsmojo.internal:3002/intent` — compose alias because the dashboard's URL validator rejects a bare host; signed with the webhook's own secret → `CHATWOOT_WEBHOOK_SECRET`). `bot/intent.js#shouldCheck`: incoming, not private, status ≠ pending, inbox in `INBOX_COUNTRIES`, market ON in `CANCELLATION_PHONES` (skip reason `routing off for this market`, no model call), no `meta.team`, no `first_reply_created_at`, non-empty. Then one structured-output call (`classify`, JSON `{intent, summary}`; anything unsure = `other` = do nothing) → re-read `GET /conversations/:id` (snapshot may be stale) → team → note → customer line (email/API wording: "reply by email"). RAM `routingState` stops double routing. Accuracy script: `node --env-file=.env scripts/intent-eval.mjs` |
 | Knowledge | `bot/prompt.js` + `faq.md` + `helpcenter.md` (generated from `scripts/helpcenter_import.rb`), per-inbox market via `INBOX_SITES` |
+| Tests | `node --test tests/bot/*.test.mjs` (Node 22 built-in runner, no deps; pure modules `handoff.js`, `markets.js`, `intent.js`). Outside `bot/` on purpose: the Docker build context is `bot/` alone |
 
 **Hard-won deployment lessons already encoded in comments**
 
@@ -675,6 +678,37 @@ and needs headroom in Docker Desktop's disk limit — a full VM disk shows up as
    Amazon SES for sending, one env change, DNS records from the domain
    owner. Full write-up, options table, draft Postfix config, admin
    questions: `docs/email-integration.md`. Internals in §16.
+
+9. **Cancellation routing + intent checker — code written 7 Oct 2026, not yet
+   deployed** (§8 rows). Bot-only release: `docker compose build bot && docker
+   compose up -d bot` (the compose alias on the bot service is picked up by that
+   `up`). Dashboard prerequisites: team "Cancellations & Reschedule" with
+   *Allow auto assign* on and members who are agents on the watched inboxes;
+   account webhook `http://bot.flightsmojo.internal:3002/intent` with only
+   "message created"; env `CANCELLATION_TEAM_ID`, `CANCELLATION_PHONES`
+   (`{"IN":"00911246932002"}` — the per-market switch, India only for now; add
+   a market's code + number to turn it on), `CHATWOOT_WEBHOOK_SECRET`,
+   `INBOX_COUNTRIES` (inbox → market = the watch list; leave TripShield #17 out) —
+   live inboxes on 7 Oct: 1 India.Chat, 2 UAE.Chat, 3 USA.Chat, 4 UK.Chat,
+   6 US.WhatsApp, 7 India.WhatsApp, 8 USA-CA.Email, 9 Web Tickets, 10 Canada.Chat,
+   12 UK.Email, 13 APAC.Chat, 14 APAC.Mail, 15 UAE.Email, 16 India.Mail,
+   17 TripShield (inboxes 5 and 11 were deleted; `INBOX_SITES` on prod still
+   names 5 and misses 6/7/10/13) → `{"1":"IN","2":"AE","3":"US","4":"UK","6":"US",
+   "7":"IN","8":"US","9":"*","10":"CA","12":"UK","13":"APAC","14":"APAC","15":"AE","16":"IN"}`;
+   optional `CANCELLATION_LABEL`. Team id is **3** ("cancellations &
+   reschedule", auto-assign on; only one member on 7 Oct). **Order matters:**
+   deploy the bot first (that creates the `bot.flightsmojo.internal` alias and
+   turns on chat-bot routing), *then* create the account webhook — created
+   earlier, every delivery times out for 5 s in Sidekiq — then put its secret
+   in `.env` and `docker compose up -d bot` once more. Known side effect: the email/ticket auto-reply
+   goes through Netcore (~4 min delay + footer, accepted 28 Sep). Rollout:
+   India only (`CANCELLATION_PHONES`); every other market stays a plain
+   handoff until its code + number is added — watch `[conv N] intent: …` /
+   `routed to cancellations team` in the bot logs first. Published support
+   lines verified on the live sites 7 Oct, for reference only (the bot quotes
+   nothing but `CANCELLATION_PHONES`): IN +91 124 6932000 (fare-rules
+   cancellation line), US/CA +1 202-839-9858, UK +44 20 4578 5985,
+   AE +971-58-578-4933, PH +63 2 5323 5784, ID +62 855-7480-0128.
 
 ---
 

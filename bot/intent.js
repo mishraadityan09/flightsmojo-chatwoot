@@ -43,10 +43,11 @@ export function hasFirstReply(conversation) {
 }
 
 /** What the classifier gets to see. */
-export function classifierInput(event) {
+export function classifierInput(event, { today } = {}) {
   const conv = event.conversation || {};
   const extra = conv.additional_attributes || {};
   return {
+    today: today || "",
     channel: conv.channel || "",
     subject: String(extra.mail_subject || extra.subject || "").trim().slice(0, 200),
     issueType: String(conv.custom_attributes?.issue_type || "").trim().slice(0, 50),
@@ -66,10 +67,14 @@ Answer intent "other" for everything else, including:
 
 "Issue type" is what the customer picked on a web form — a hint only; the text decides.
 
-Also write "summary": one line, at most 160 characters, in English, saying what the customer wants, with any booking id, PNR, route or date mentioned. Facts only — no advice, no instructions.`;
+Also write "summary": one line, at most 160 characters, in English, saying what the customer wants, with any booking id, PNR, route or date mentioned. Facts only — no advice, no instructions.
 
-export function classifierUserMessage({ channel, subject, issueType, text }) {
-  const lines = [`Channel: ${channel.replace(/^Channel::/, "") || "unknown"}`];
+Also write "travel_date": the first travel date of the booking the message is about, as YYYY-MM-DD, when the message gives one — work out "tomorrow", "this Friday", "15th" from the Today line. null when no travel date is given or it is unclear.`;
+
+export function classifierUserMessage({ today, channel, subject, issueType, text }) {
+  const lines = [];
+  if (today) lines.push(`Today: ${today}`);
+  lines.push(`Channel: ${channel.replace(/^Channel::/, "") || "unknown"}`);
   if (subject) lines.push(`Subject: ${subject}`);
   if (issueType) lines.push(`Issue type picked on the form: ${issueType}`);
   lines.push("Message:", '"""', text, '"""');
@@ -81,8 +86,9 @@ const OUTPUT_SCHEMA = {
   properties: {
     intent: { type: "string", enum: ["cancellation", "other"] },
     summary: { type: "string" },
+    travel_date: { type: ["string", "null"] },
   },
-  required: ["intent", "summary"],
+  required: ["intent", "summary", "travel_date"],
   additionalProperties: false,
 };
 
@@ -93,12 +99,14 @@ export function parseClassification(raw) {
     try {
       obj = JSON.parse(raw);
     } catch {
-      return { intent: "other", summary: "" };
+      return { intent: "other", summary: "", travelDate: null };
     }
   }
   const intent = obj?.intent === "cancellation" ? "cancellation" : "other";
   const summary = String(obj?.summary ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
-  return { intent, summary };
+  const date = String(obj?.travel_date ?? "").trim();
+  const travelDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
+  return { intent, summary, travelDate };
 }
 
 /**
@@ -158,6 +166,7 @@ async function classifyGemini(userMessage, { geminiKey, geminiModel }, fetchImpl
             properties: {
               intent: { type: "string", enum: ["cancellation", "other"] },
               summary: { type: "string" },
+              travel_date: { type: "string", nullable: true },
             },
             required: ["intent", "summary"],
           },

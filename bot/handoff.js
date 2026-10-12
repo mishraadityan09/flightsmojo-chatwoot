@@ -29,12 +29,23 @@ export const TRANSFER_TOOL = Object.freeze({
           "One line (max 200 characters) for the agent, in English: what the customer wants, " +
           "with any booking id, PNR, route or dates they gave, and whether a lookup found the booking.",
       },
+      travel_date: {
+        type: "string",
+        description:
+          "First travel date of the booking in question as YYYY-MM-DD, from the lookup or the customer. Empty if unknown.",
+      },
+      callback_phone: {
+        type: "string",
+        description: "Phone number the customer gave for a call back, with country code. Empty if none.",
+      },
     },
     required: ["reason", "summary"],
   },
 });
 
 const SUMMARY_MAX = 300;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PHONE_RE = /^\+?\d[\d\s().-]{5,24}$/;
 
 /** Normalise whatever the model passed to the tool into a safe handoff. */
 export function parseTransfer(args = {}) {
@@ -43,7 +54,14 @@ export function parseTransfer(args = {}) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, SUMMARY_MAX);
-  return { reason, summary };
+  const date = String(args?.travel_date ?? "").trim();
+  const phone = String(args?.callback_phone ?? "").trim();
+  return {
+    reason,
+    summary,
+    travelDate: DATE_RE.test(date) ? date : null,
+    callbackPhone: PHONE_RE.test(phone) ? phone : null,
+  };
 }
 
 const GENERIC_HANDOFF =
@@ -74,10 +92,17 @@ export function channelLabel(channel) {
  * number is always exact and never appears anywhere else.
  *  - a cancellation that was routed: "passed to the cancellations team" + the
  *    market's number (CANCELLATION_PHONES), worded for the channel
+ *  - `callback` (routed outside desk hours, travel not imminent): the team
+ *    will call back first thing in the morning — no number
  *  - anything else: the generic handoff line
  */
-export function customerMessage({ reason, routed, phone, channel }) {
+export function customerMessage({ reason, routed, phone, channel, callback }) {
   if (reason !== "cancellation" || !routed) return GENERIC_HANDOFF;
+  if (callback) {
+    return repliesByEmail(channel)
+      ? "We've received your request and passed it to our cancellations team. They'll be in touch first thing in the morning."
+      : "Thanks — I've passed your request to our cancellations team. We've got your details, and a teammate will call you back first thing in the morning.";
+  }
   const base = repliesByEmail(channel)
     ? "We've received your request and passed it to our cancellations team, who will reply to you by email shortly."
     : "Thanks — I've passed your request to our cancellations team; a teammate will pick it up right here shortly.";
@@ -87,6 +112,12 @@ export function customerMessage({ reason, routed, phone, channel }) {
 const REASON_LABEL = Object.freeze({
   cancellation: "cancellation request",
   other: "needs a human",
+});
+
+const DESK_LINE = Object.freeze({
+  callback:
+    "Routed to the cancellations team. Outside desk hours — the customer was told the team will call back first thing in the morning.",
+  urgent: "Routed to the cancellations team. Outside desk hours, but travel is within a day — the number was sent.",
 });
 
 const LOOKUP_LABEL = Object.freeze({
@@ -99,6 +130,8 @@ const LOOKUP_LABEL = Object.freeze({
  * (the chat bot handed off) or "checker" (the intent checker on an email,
  * ticket, WhatsApp or human-owned chat). `routingOff` = a cancellation in a
  * market where routing is switched off, so "not routed" is by design.
+ * `desk` = what the night rule decided: "callback" (told: call back in the
+ * morning) or "urgent" (outside hours but travel within a day: number sent).
  */
 export function agentNote({
   source,
@@ -109,8 +142,11 @@ export function agentNote({
   bookingId,
   pnr,
   lookup,
+  travelDate,
+  callbackPhone,
   routed,
   routingOff,
+  desk,
 }) {
   const head = source === "checker" ? "🤖 Intent check" : "🤖 Bot handoff";
   const lines = [`${head} — ${REASON_LABEL[reason] || REASON_LABEL.other} (${channelLabel(channel)})`];
@@ -120,12 +156,14 @@ export function agentNote({
   if (bookingId) facts.push(`Booking ID: ${bookingId}`);
   if (pnr) facts.push(`PNR: ${pnr}`);
   if (lookup) facts.push(`Lookup: ${LOOKUP_LABEL[lookup] || lookup}`);
+  if (travelDate) facts.push(`Travel date: ${travelDate}`);
+  if (callbackPhone) facts.push(`Call back on: ${callbackPhone}`);
   if (facts.length) lines.push(facts.join(" · "));
 
   if (summary) lines.push(`Summary: ${summary}`);
   lines.push(
     routed
-      ? "Routed to the cancellations team."
+      ? DESK_LINE[desk] || "Routed to the cancellations team."
       : routingOff
         ? "Not routed to a team — cancellation routing is switched off for this market."
         : "Not routed to a team — please triage.",

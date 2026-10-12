@@ -106,11 +106,11 @@ test("classifierUserMessage omits lines it has nothing for", () => {
 });
 
 test("parseClassification: only a literal cancellation routes; everything else is other", () => {
-  assert.deepEqual(parseClassification(JSON.stringify({ intent: "cancellation", summary: "  cancel \n 1 " })), { intent: "cancellation", summary: "cancel 1" });
-  assert.deepEqual(parseClassification({ intent: "other", summary: "hi" }), { intent: "other", summary: "hi" });
-  assert.deepEqual(parseClassification({ intent: "Cancellation", summary: "" }), { intent: "other", summary: "" });
-  assert.deepEqual(parseClassification("not json"), { intent: "other", summary: "" });
-  assert.deepEqual(parseClassification(null), { intent: "other", summary: "" });
+  assert.deepEqual(parseClassification(JSON.stringify({ intent: "cancellation", summary: "  cancel \n 1 " })), { intent: "cancellation", summary: "cancel 1", travelDate: null });
+  assert.deepEqual(parseClassification({ intent: "other", summary: "hi" }), { intent: "other", summary: "hi", travelDate: null });
+  assert.deepEqual(parseClassification({ intent: "Cancellation", summary: "" }), { intent: "other", summary: "", travelDate: null });
+  assert.deepEqual(parseClassification("not json"), { intent: "other", summary: "", travelDate: null });
+  assert.deepEqual(parseClassification(null), { intent: "other", summary: "", travelDate: null });
 });
 
 test("instructions name the airline-initiated and refund-status exclusions", () => {
@@ -130,7 +130,7 @@ test("classify (openai): sends a strict JSON schema and parses output_text", asy
     { provider: "openai", openaiKey: "k", openaiModel: "m" },
     fetchImpl,
   );
-  assert.deepEqual(verdict, { intent: "cancellation", summary: "cancel 345678" });
+  assert.deepEqual(verdict, { intent: "cancellation", summary: "cancel 345678", travelDate: null });
   assert.equal(sent.url, "https://api.openai.com/v1/responses");
   assert.equal(sent.auth, "Bearer k");
   assert.equal(sent.body.model, "m");
@@ -152,7 +152,7 @@ test("classify (openai): falls back to the message items when output_text is abs
     }),
   });
   const verdict = await classify({ channel: "", subject: "", issueType: "", text: "baggage?" }, { provider: "openai" }, fetchImpl);
-  assert.deepEqual(verdict, { intent: "other", summary: "asks about baggage" });
+  assert.deepEqual(verdict, { intent: "other", summary: "asks about baggage", travelDate: null });
 });
 
 test("classify (gemini): JSON mode with a response schema", async () => {
@@ -166,7 +166,7 @@ test("classify (gemini): JSON mode with a response schema", async () => {
     { provider: "gemini", geminiKey: "g", geminiModel: "gemini-2.5-flash" },
     fetchImpl,
   );
-  assert.deepEqual(verdict, { intent: "cancellation", summary: "s" });
+  assert.deepEqual(verdict, { intent: "cancellation", summary: "s", travelDate: null });
   assert.match(sent.url, /gemini-2\.5-flash:generateContent\?key=g$/);
   assert.equal(sent.body.generationConfig.responseMimeType, "application/json");
   assert.equal(sent.body.generationConfig.temperature, 0);
@@ -179,4 +179,18 @@ test("classify throws on an API error so the caller leaves the chat alone", asyn
     classify({ channel: "", subject: "", issueType: "", text: "x" }, { provider: "openai" }, fetchImpl),
     /OpenAI classify 429: quota/,
   );
+});
+
+test("parseClassification keeps a well-formed travel_date and drops anything else", () => {
+  assert.equal(parseClassification({ intent: "cancellation", summary: "s", travel_date: "2026-10-13" }).travelDate, "2026-10-13");
+  assert.equal(parseClassification({ intent: "cancellation", summary: "s", travel_date: "tomorrow" }).travelDate, null);
+  assert.equal(parseClassification({ intent: "cancellation", summary: "s", travel_date: null }).travelDate, null);
+});
+
+test("classifierUserMessage leads with today's date when given, so relative dates can be resolved", () => {
+  const msg = classifierUserMessage({ today: "2026-10-12", channel: "Channel::Email", subject: "", issueType: "", text: "cancel tomorrow's flight" });
+  assert.match(msg, /^Today: 2026-10-12\nChannel: Email\n/);
+  assert.doesNotMatch(classifierUserMessage({ channel: "Channel::Email", subject: "", issueType: "", text: "x" }), /Today/);
+  assert.equal(classifierInput({ conversation: {}, content: "x" }, { today: "2026-10-12" }).today, "2026-10-12");
+  assert.equal(classifierInput({ conversation: {}, content: "x" }).today, "");
 });

@@ -9,13 +9,15 @@ test("transfer tool schema: reason is a closed enum, both fields required", () =
 });
 
 test("parseTransfer normalises the model's arguments", () => {
+  const none = { travelDate: null, callbackPhone: null };
   assert.deepEqual(parseTransfer({ reason: "cancellation", summary: "  cancel  booking 1 \n now " }), {
     reason: "cancellation",
     summary: "cancel booking 1 now",
+    ...none,
   });
-  assert.deepEqual(parseTransfer({ reason: "refund", summary: "x" }), { reason: "other", summary: "x" });
-  assert.deepEqual(parseTransfer({}), { reason: "other", summary: "" });
-  assert.deepEqual(parseTransfer(undefined), { reason: "other", summary: "" });
+  assert.deepEqual(parseTransfer({ reason: "refund", summary: "x" }), { reason: "other", summary: "x", ...none });
+  assert.deepEqual(parseTransfer({}), { reason: "other", summary: "", ...none });
+  assert.deepEqual(parseTransfer(undefined), { reason: "other", summary: "", ...none });
   assert.equal(parseTransfer({ reason: "other", summary: "a".repeat(500) }).summary.length, 300);
 });
 
@@ -124,4 +126,46 @@ test("agentNote: a cancellation in a market that is switched off says so, instea
   assert.match(note, /^🤖 Bot handoff — cancellation request \(website chat\)\n/);
   assert.match(note, /\nNot routed to a team — cancellation routing is switched off for this market\.$/);
   assert.doesNotMatch(note, /please triage/);
+});
+
+test("parseTransfer keeps a well-formed travel date and callback number, drops anything else", () => {
+  const ok = parseTransfer({ reason: "cancellation", summary: "s", travel_date: " 2026-10-13 ", callback_phone: "+91 98765 43210" });
+  assert.equal(ok.travelDate, "2026-10-13");
+  assert.equal(ok.callbackPhone, "+91 98765 43210");
+  const bad = parseTransfer({ reason: "cancellation", summary: "s", travel_date: "tomorrow", callback_phone: "call me later" });
+  assert.equal(bad.travelDate, null);
+  assert.equal(bad.callbackPhone, null);
+});
+
+test("customerMessage: outside desk hours the customer is promised a morning call back, no number", () => {
+  assert.equal(
+    customerMessage({ reason: "cancellation", routed: true, phone: null, channel: "Channel::WebWidget", callback: true }),
+    "Thanks — I've passed your request to our cancellations team. We've got your details, and a teammate will call you back first thing in the morning.",
+  );
+  assert.equal(
+    customerMessage({ reason: "cancellation", routed: true, phone: null, channel: "Channel::Email", callback: true }),
+    "We've received your request and passed it to our cancellations team. They'll be in touch first thing in the morning.",
+  );
+  // callback only applies to a routed cancellation
+  assert.equal(customerMessage({ reason: "other", routed: false, phone: null, channel: "Channel::WebWidget", callback: true }), GENERIC);
+});
+
+test("agentNote: travel date, callback number and the night-rule outcome", () => {
+  const night = agentNote({
+    source: "bot",
+    reason: "cancellation",
+    summary: "cancel 14 Oct flight",
+    channel: "Channel::WebWidget",
+    email: "r@example.com",
+    travelDate: "2026-10-20",
+    callbackPhone: "+91 98765 43210",
+    routed: true,
+    desk: "callback",
+  });
+  assert.match(night, /Email: r@example.com · Travel date: 2026-10-20 · Call back on: \+91 98765 43210/);
+  assert.match(night, /Outside desk hours — the customer was told the team will call back first thing in the morning\.$/);
+  const urgent = agentNote({ source: "checker", reason: "cancellation", summary: "s", channel: "Channel::Email", travelDate: "2026-10-13", routed: true, desk: "urgent" });
+  assert.match(urgent, /Outside desk hours, but travel is within a day — the number was sent\.$/);
+  const day = agentNote({ source: "checker", reason: "cancellation", summary: "s", channel: "Channel::Email", routed: true, desk: "open" });
+  assert.match(day, /\nRouted to the cancellations team\.$/);
 });

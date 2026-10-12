@@ -10,7 +10,7 @@
 //     humans like any other chat, and the intent checker leaves the
 //     conversation alone
 // Turning a market on later = add its code and number, then
-// `docker compose up -d bot`. Only the CODE ever sends a number to a
+// `docker compose up -d --no-deps bot`. Only the CODE ever sends a number to a
 // customer; the model is told nothing about phones (faq.md forbids it from
 // sharing any).
 //
@@ -23,6 +23,13 @@
 //   - a shared regional inbox ("APAC") is a market of its own — on only if
 //     CANCELLATION_PHONES lists that code
 // Only inboxes listed here are watched by the intent checker.
+//
+// CANCELLATION_DESK_HOURS (env, JSON) says when each market's cancellations
+// line is answered: {"IN":"09:00-21:00 Asia/Kolkata"}. Outside those hours
+// the number goes only to a customer travelling within
+// CANCELLATION_URGENT_DAYS (default 1 = today or tomorrow); everyone else is
+// told the team will call back first thing in the morning. No hours for a
+// market = the number at any hour.
 
 const MARKET_CODE = /^[A-Z]{2,4}$/;
 // Digits with the usual separators, optionally led by "+" or "(": enough to
@@ -88,4 +95,73 @@ export function marketFor(conversation, inboxCountries) {
 export function phoneFor(market, phones) {
   if (!market || !phones || !Object.hasOwn(phones, market)) return null;
   return phones[market] || null;
+}
+
+const HOURS = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})\s+(\S+)$/;
+
+function validZone(tz) {
+  try {
+    Intl.DateTimeFormat("en-CA", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Parse CANCELLATION_DESK_HOURS → { CODE: { from, to, tz } } (minutes of the
+ *  day). A malformed entry or unknown zone is dropped = no hours = any hour. */
+export function parseDeskHours(raw) {
+  const hours = {};
+  for (const [market, value] of Object.entries(parseJsonObject(raw))) {
+    const code = market.trim().toUpperCase();
+    const m = String(value ?? "")
+      .trim()
+      .match(HOURS);
+    if (!MARKET_CODE.test(code) || !m || !validZone(m[5])) continue;
+    const [h1, m1, h2, m2] = [m[1], m[2], m[3], m[4]].map(Number);
+    if (h1 > 23 || h2 > 23 || m1 > 59 || m2 > 59) continue;
+    hours[code] = { from: h1 * 60 + m1, to: h2 * 60 + m2, tz: m[5] };
+  }
+  return hours;
+}
+
+/** Wall clock in a zone: { date: "YYYY-MM-DD", minutes since midnight }. */
+export function localClock(tz, now = new Date()) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    })
+      .formatToParts(now)
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, p.value]),
+  );
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    minutes: Number(parts.hour) * 60 + Number(parts.minute),
+  };
+}
+
+/** Is the market's desk answering the phone right now? No hours → always. */
+export function deskOpen(market, hours, now = new Date()) {
+  const rule = market && hours && Object.hasOwn(hours, market) ? hours[market] : null;
+  if (!rule) return true;
+  const { minutes } = localClock(rule.tz, now);
+  return rule.from <= rule.to
+    ? minutes >= rule.from && minutes < rule.to
+    : minutes >= rule.from || minutes < rule.to; // window crosses midnight
+}
+
+/** Whole days from today (in the zone) to a YYYY-MM-DD date; null if unparseable. */
+export function daysUntil(dateStr, tz, now = new Date()) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr ?? ""))) return null;
+  const target = Date.parse(`${dateStr}T00:00:00Z`);
+  const today = Date.parse(`${localClock(tz, now).date}T00:00:00Z`);
+  if (Number.isNaN(target) || Number.isNaN(today)) return null;
+  return Math.round((target - today) / 86400000);
 }

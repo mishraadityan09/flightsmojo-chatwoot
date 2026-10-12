@@ -16,7 +16,16 @@ import express from "express";
 import crypto from "node:crypto";
 import { buildSystemPrompt } from "./prompt.js";
 import { TRANSFER_TOOL, parseTransfer, customerMessage, agentNote } from "./handoff.js";
-import { parseInboxCountries, parseCancellationPhones, marketFor, phoneFor } from "./markets.js";
+import {
+  parseInboxCountries,
+  parseCancellationPhones,
+  parseDeskHours,
+  marketFor,
+  phoneFor,
+  deskOpen,
+  daysUntil,
+  localClock,
+} from "./markets.js";
 import { shouldCheck, classifierInput, classify, hasFirstReply } from "./intent.js";
 
 // Lesson: config & secrets come from the environment (.env via compose),
@@ -63,6 +72,10 @@ const {
   CANCELLATION_TEAM_ID,
   // Optional label added when routing (must exist in Settings → Labels).
   CANCELLATION_LABEL,
+  // Outside a market's desk hours (markets.js) the number goes only to a
+  // customer travelling within this many days; the rest are promised a call
+  // back first thing in the morning. Default 1 = today or tomorrow.
+  CANCELLATION_URGENT_DAYS = "1",
   // Secret of the ACCOUNT webhook that feeds /intent (Settings → Integrations
   // → Webhooks). Unset = the intent checker is off; /intent just says 200.
   CHATWOOT_WEBHOOK_SECRET,
@@ -73,13 +86,17 @@ const {
 // inbox id -> human description ("flightsmojo.ae (UAE) — prices in AED").
 // Unknown inboxes get a market-neutral prompt.
 const INBOX_SITES = JSON.parse(process.env.INBOX_SITES || "{}");
-const promptCache = new Map();
+// Rebuilt once a day per inbox: the prompt carries today's date (in the
+// market's zone) so the model can turn "tomorrow" into a real travel date.
+const promptCache = new Map(); // inbox id -> { date, prompt }
 function systemPromptFor(inboxId) {
   const key = String(inboxId ?? "");
-  if (!promptCache.has(key)) {
-    promptCache.set(key, buildSystemPrompt(INBOX_SITES[key]));
-  }
-  return promptCache.get(key);
+  const { date } = localClock(zoneFor(INBOX_COUNTRIES[key]));
+  const cached = promptCache.get(key);
+  if (cached?.date === date) return cached.prompt;
+  const prompt = buildSystemPrompt(INBOX_SITES[key], { today: date });
+  promptCache.set(key, { date, prompt });
+  return prompt;
 }
 
 // Inbox → market map; doubles as the intent checker's watch list. Which
@@ -88,6 +105,22 @@ function systemPromptFor(inboxId) {
 // also needs the webhook secret and at least one watched inbox.
 const INBOX_COUNTRIES = parseInboxCountries(process.env.INBOX_COUNTRIES);
 const CANCELLATION_PHONES = parseCancellationPhones(process.env.CANCELLATION_PHONES);
+const DESK_HOURS = parseDeskHours(process.env.CANCELLATION_DESK_HOURS);
+const URGENT_DAYS = /^\d+$/.test(String(CANCELLATION_URGENT_DAYS)) ? Number(CANCELLATION_URGENT_DAYS) : 1;
+/** The zone a market's clock runs in; UTC when no desk hours are configured. */
+function zoneFor(market) {
+  return (market && DESK_HOURS[market]?.tz) || "UTC";
+}
+/** The night rule for a routed cancellation: { sendPhone, state } with state
+ *  "open" (desk hours), "urgent" (closed, but travel within URGENT_DAYS →
+ *  number anyway) or "callback" (closed → call back in the morning). */
+function deskDecision(market, travelDate, now = new Date()) {
+  if (deskOpen(market, DESK_HOURS, now)) return { sendPhone: true, state: "open" };
+  const days = daysUntil(travelDate, zoneFor(market), now);
+  return days !== null && days <= URGENT_DAYS
+    ? { sendPhone: true, state: "urgent" }
+    : { sendPhone: false, state: "callback" };
+}
 const ROUTING_ENABLED =
   /^\d+$/.test(String(CANCELLATION_TEAM_ID || "")) && Object.keys(CANCELLATION_PHONES).length > 0;
 const INTENT_ENABLED =
@@ -240,9 +273,14 @@ async function checkIntent(event) {
   if (routingState.has(conversationId)) return; // being classified, or routed already
   rememberRouting(conversationId, "checking");
   try {
-    const verdict = await classify(classifierInput(event), CLASSIFIER_CONFIG);
+    const market = marketFor(event.conversation, INBOX_COUNTRIES);
+    const verdict = await classify(
+      classifierInput(event, { today: localClock(zoneFor(market)).date }),
+      CLASSIFIER_CONFIG,
+    );
     console.log(
-      `[conv ${conversationId}] intent: ${verdict.intent}${verdict.summary ? ` — ${verdict.summary}` : ""}`,
+      `[conv ${conversationId}] intent: ${verdict.intent}${verdict.summary ? ` — ${verdict.summary}` : ""}` +
+        (verdict.travelDate ? ` (travel ${verdict.travelDate})` : ""),
     );
     if (verdict.intent !== "cancellation") {
       routingState.delete(conversationId); // the next message gets a fresh look
@@ -260,6 +298,7 @@ async function checkIntent(event) {
       return; // nothing is said to the customer — the chat is exactly as it was
     }
     const conv = event.conversation;
+    const desk = deskDecision(market, verdict.travelDate);
     await postNote(
       conversationId,
       agentNote({
@@ -267,7 +306,9 @@ async function checkIntent(event) {
         reason: "cancellation",
         summary: verdict.summary,
         channel: conv.channel,
+        travelDate: verdict.travelDate,
         routed: true,
+        desk: desk.state,
       }),
     );
     await postReply(
@@ -275,8 +316,9 @@ async function checkIntent(event) {
       customerMessage({
         reason: "cancellation",
         routed: true,
-        phone: cancellationPhone(conv),
+        phone: desk.sendPhone ? cancellationPhone(conv) : null,
         channel: conv.channel,
+        callback: desk.state === "callback",
       }),
     );
   } catch (err) {
@@ -538,6 +580,7 @@ async function connectToHuman(conversationId, ctx, handoff) {
   // No number = routing is off for this market (or everywhere): plain handoff.
   const phone = cancellation && ROUTING_ENABLED ? cancellationPhone(conv) : null;
   const routed = Boolean(phone) && (await routeToCancellations(conversationId));
+  const desk = routed ? deskDecision(marketFor(conv, INBOX_COUNTRIES), handoff.travelDate) : null;
   await postNote(
     conversationId,
     agentNote({
@@ -549,11 +592,23 @@ async function connectToHuman(conversationId, ctx, handoff) {
       bookingId: ctx.knownBookingId || facts.bookingId,
       pnr: facts.pnr,
       lookup: facts.outcome,
+      travelDate: handoff.travelDate,
+      callbackPhone: handoff.callbackPhone,
       routed,
       routingOff: cancellation && !phone,
+      desk: desk?.state,
     }),
   );
-  await postReply(conversationId, customerMessage({ reason: handoff.reason, routed, phone, channel: conv.channel }));
+  await postReply(
+    conversationId,
+    customerMessage({
+      reason: handoff.reason,
+      routed,
+      phone: desk?.sendPhone ? phone : null,
+      channel: conv.channel,
+      callback: desk?.state === "callback",
+    }),
+  );
   await handoffToHuman(conversationId);
 }
 
@@ -970,6 +1025,13 @@ app.listen(PORT, () => {
           (CANCELLATION_LABEL ? `, label "${CANCELLATION_LABEL}"` : "") +
           `; inbox → market map for ${watched.join(", ") || "(none)"}`
       : "cancellation routing: off (set CANCELLATION_TEAM_ID and CANCELLATION_PHONES to enable)",
+  );
+  const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+  const deskRules = Object.entries(DESK_HOURS).map(([m, r]) => `${m} ${hhmm(r.from)}-${hhmm(r.to)} ${r.tz}`);
+  console.log(
+    deskRules.length
+      ? `cancellation desk hours: ${deskRules.join(", ")} — outside them only travel within ${URGENT_DAYS} day(s) gets the number, others are promised a morning call back`
+      : "cancellation desk hours: none (the number goes out at any hour)",
   );
   console.log(
     INTENT_ENABLED

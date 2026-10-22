@@ -115,6 +115,56 @@ services:
           # resolves it on the compose network exactly like "bot".
           - bot.flightsmojo.internal
 
+  reviews:
+    # Store reviews → tickets (reviews/ folder): polls Google Play, the App Store
+    # and Google Business Profile into one API inbox each, and posts agent
+    # replies back as the public store reply. Every store is off until its
+    # REVIEWS_* variables are set; replies are read-only until
+    # REVIEWS_REPLY_MODE=post. Design: docs/store-reviews-to-chatwoot.md.
+    build: ./reviews
+    env_file: .env
+    logging: *default-logging
+    restart: always
+    depends_on:
+      - rails
+    ports:
+      # localhost-only, for curl debugging (rails reaches it as reviews:3003)
+      - '127.0.0.1:3003:3003'
+    networks:
+      default:
+        aliases:
+          # Dotted name for the three inbox webhooks (Settings → Inboxes →
+          # the inbox → Webhook URL → http://reviews.flightsmojo.internal:3003/chatwoot):
+          # the dashboard's URL validator rejects a bare "reviews" host.
+          - reviews.flightsmojo.internal
+
+  triage:
+    # IROP supplier mail → tickets (triage/ folder): Postfix hands the agency
+    # mailbox's forward address to this service; it classifies each mail and
+    # relays only IROP (and unsure) mail into Chatwoot's relay ingress, then
+    # stamps the ticket through the account webhook. Ingest answers 503 (so
+    # Postfix queues) until RAILS_INBOUND_EMAIL_PASSWORD + a classifier key are
+    # set; stamping is off until TRIAGE_* is set. Design: docs/irop-mail-triage.md.
+    build: ./triage
+    env_file: .env
+    logging: *default-logging
+    restart: always
+    depends_on:
+      - rails
+    ports:
+      # localhost-only: Postfix's triage-ingress script posts here
+      - '127.0.0.1:3004:3004'
+    volumes:
+      # the ledger (verdicts.jsonl): audit trail + the daily re-bump work list
+      - triage_data:/data
+    networks:
+      default:
+        aliases:
+          # Dotted name for the account webhook (Settings → Integrations →
+          # Webhooks → http://triage.flightsmojo.internal:3004/chatwoot).
+          - triage.flightsmojo.internal
+
 volumes:
   storage_data:
   redis_data:
+  triage_data:

@@ -278,7 +278,7 @@ auto-resolve timers, by design.
 | Cancellation routing (2026-10-07) | **Per-market switch** `CANCELLATION_PHONES` (JSON, `{"IN":"00911246932002"}`): a market listed there is ON, every other market is a plain handoff (generic line, note says "routing is switched off for this market"). `reason: cancellation` on an ON market + `CANCELLATION_TEAM_ID` → `POST /assignments {team_id}` **before** the status flip (Chatwoot picks a team member when the team allows auto-assign), optional `CANCELLATION_LABEL` (labels endpoint *replaces* the list, so index → union → create), then the customer line carries that market's number (`bot/markets.js`: `INBOX_COUNTRIES` inbox → market; `"*"` = the ticket's `country` attribute). Returns false → generic line, never a false "passed to the team". Go-live 2026-10-07: India only; the model never learns about markets or numbers. **Night rule (12 Oct 2026):** `CANCELLATION_DESK_HOURS` (`{"IN":"09:00-21:00 Asia/Kolkata"}`) — outside them the number goes out only when the travel date (`travel_date` tool argument from the chat bot, `travel_date` field from the classifier, both YYYY-MM-DD) is within `CANCELLATION_URGENT_DAYS` (default 1); everyone else gets the "call back first thing in the morning" line, and the note says which. The bot asks web-chat customers for a `callback_phone`; the system prompt carries today's date in the market's zone (rebuilt once a day per inbox) so "tomorrow" resolves |
 | Intent checker (2026-10-07) | `POST /intent` fed by an **account webhook** (`message_created`, URL `http://bot.flightsmojo.internal:3002/intent` — compose alias because the dashboard's URL validator rejects a bare host; signed with the webhook's own secret → `CHATWOOT_WEBHOOK_SECRET`). `bot/intent.js#shouldCheck`: incoming, not private, status ≠ pending, inbox in `INBOX_COUNTRIES`, market ON in `CANCELLATION_PHONES` (skip reason `routing off for this market`, no model call), no `meta.team`, no `first_reply_created_at`, non-empty. Then one structured-output call (`classify`, JSON `{intent, summary}`; anything unsure = `other` = do nothing) → re-read `GET /conversations/:id` (snapshot may be stale) → team → note → customer line (email/API wording: "reply by email"). RAM `routingState` stops double routing. Accuracy script: `node --env-file=.env scripts/intent-eval.mjs` |
 | Knowledge | `bot/prompt.js` + `faq.md` + `helpcenter.md` (generated from `scripts/helpcenter_import.rb`), per-inbox market via `INBOX_SITES` |
-| Tests | `node --test tests/bot/*.test.mjs` (Node 22 built-in runner, no deps; pure modules `handoff.js`, `markets.js`, `intent.js`). Outside `bot/` on purpose: the Docker build context is `bot/` alone |
+| Tests | `node --test tests/bot/*.test.mjs` (Node 22 built-in runner, no deps; pure modules `handoff.js`, `markets.js`, `intent.js`). Outside `bot/` on purpose: the Docker build context is `bot/` alone. Same for the reviews bridge: `node --test tests/reviews/*.test.mjs`, and the IROP triage: `node --test tests/triage/*.test.mjs` |
 
 **Hard-won deployment lessons already encoded in comments**
 
@@ -882,3 +882,57 @@ per-inbox SMTP, otherwise `MAILER_SENDER_EMAIL`; Reply-To =
 (`RAILS_INBOUND_EMAIL_SERVICE=ses`, `ACTION_MAILBOX_SES_SNS_TOPIC`) is wired
 for the SNS action only — AWS caps that at 150 KB per email and bounces the
 rest, which is why the project uses Postfix `relay` instead.
+
+---
+
+## 17. Reviews bridge — `reviews/server.js` (hub repo, 21 Oct 2026)
+
+Store reviews (Google Play, App Store, Google Business Profile) become tickets in
+one **API inbox per store**; an agent's public reply becomes the store reply.
+Nothing in the fork changes, so the change ledger is not involved. Full design,
+the verified store API facts and the go-live checklist: **`docs/store-reviews-to-chatwoot.md`**.
+
+- Compose service `reviews` (alias `reviews.flightsmojo.internal:3003`), `env_file: .env`;
+  every store is OFF until its `REVIEWS_*` variables are set, replies are read-only
+  until `REVIEWS_REPLY_MODE=post`. Release: `docker compose up -d --no-deps reviews`.
+- Tickets go in through the **public client API** (§6 above) — contact `source_id`
+  = `<store>:<review id>`, one contact + one conversation per review, edits detected
+  by comparing text with the ticket's newest incoming message (no database).
+- Replies come back through the **API-inbox webhook** (`webhook_url` + `secret` of
+  each inbox, same signature scheme as §7). A reply the store refuses (too long,
+  API error) is answered with 4xx/5xx, which Chatwoot shows as a *failed* message,
+  plus a private note with the reason (needs `CHATWOOT_BOT_TOKEN`).
+- Dashboard side (admin, per §7 of the spec): 3 API inboxes with *Lock to single
+  conversation*, 8 custom attribute definitions (`review_*`), automation rules for
+  labels/team/priority by inbox and `review_rating`.
+
+---
+
+## 18. IROP mail triage — `triage/server.js` (hub repo, 22 Oct 2026)
+
+Supplier mail for `agency@flightsmojo.in` (~3,000 a day) is classified **before** Chatwoot
+sees it; only IROP notices (and unsure ones, during the shadow run) become tickets in one
+email inbox, prioritised by travel date and handed to the IROP team. Nothing in the fork
+changes. Design, the verified facts, the preview run and the go-live steps:
+**`docs/irop-mail-triage.md`**.
+
+- Path: M365 forward (keep a copy) → Postfix → `triage` pipe for that ONE forward address
+  (`scripts/email/triage-setup.sh`, transport map full-address entry beats the domain entry)
+  → `POST /ingest` → pre-filter (auto-replies, bounces, newsletters, env regexes; mail
+  forwarded by our own domains is always ingested) → one structured call (bot's provider
+  switch, strict JSON) → relay the UNCHANGED bytes to `rails:3000/rails/action_mailbox/relay/inbound_emails`
+  (Chatwoot routes by the `X-Original-To` Postfix added) → account webhook `message_created`
+  → `POST /chatwoot` stamps the ticket with the bot token (custom attributes merge, label
+  union, priority raised only, team when none, private note) → daily re-bump as dates approach.
+- Compose service `triage` (alias `triage.flightsmojo.internal:3004`, volume `triage_data`
+  for the JSONL ledger); ingest answers **503** (Postfix queues) until
+  `RAILS_INBOUND_EMAIL_PASSWORD` + a classifier key exist; stamping needs `TRIAGE_INBOX_ID`,
+  `TRIAGE_TEAM_ID`, `TRIAGE_WEBHOOK_SECRET`, `CHATWOOT_BOT_TOKEN`. Release:
+  `docker compose build triage && docker compose up -d --no-deps triage`.
+- Fail-open everywhere: model down → ticket labelled `irop-unsure` with the error in the
+  note; relay down → 500 so Postfix retries; nothing is ever deleted or moved in the mailbox.
+- Gotchas learned: Chatwoot lower-cases team names; the inbox's own assignment policy can
+  assign an agent before the webhook arrives (set the team regardless of assignee); FM-09
+  sticky assignment is account-wide by contact, harmless in phase 1 only because nobody
+  replies to suppliers from this inbox (FM-28 before phase 2); `grep -r` skips the symlinked
+  nginx site files on the box.

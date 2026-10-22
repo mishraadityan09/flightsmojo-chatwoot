@@ -547,6 +547,67 @@ Rollback: `env-setup.sh` writes `/root/env-backups/env-<timestamp>-<pid>.bak`;
 `systemctl disable --now postfix` stops receiving; nothing in the Chatwoot
 image changes.
 
+## Troubleshooting — "mail not sent" (added 8 Oct 2026)
+
+How a reply leaves Chatwoot on an **Email** inbox: `SendReplyJob` (Sidekiq, queue
+`high`) → `Email::SendOnEmailService` → `ConversationReplyMailer#email_reply`
+`deliver_now` → SMTP to Netcore, synchronously inside the worker. Success sets
+`messages.source_id` to the Message-ID and logs `Email message N sent with
+source_id: …`. Failure calls `Messages::StatusUpdateService` → `messages.status = 3`
+(failed) and stores the SMTP error under `external_error` inside `content_attributes`. Rails writes that
+column as a **JSON string inside the JSON column** (`store … coder: JSON`), so a plain
+`content_attributes->>'external_error'` returns NULL; unwrap it first:
+`(content_attributes #>> '{}')::jsonb ->> 'external_error'`; the dashboard shows it as "Failed to send" with the
+error on hover. `scripts/email/check.sh` covers the *receiving* path only.
+
+All read-only, run as root in `/root/flightsmojo-chatwoot`:
+
+```bash
+# 1. last 24 h of outgoing email replies with status + error
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+select m.id as message_id, c.display_id as ticket, i.name as inbox, m.created_at,
+       case m.status when 3 then 'FAILED' when 0 then 'sent' when 1 then 'delivered' when 2 then 'read' end as status,
+       m.source_id is not null as handed_to_netcore,
+       left((m.content_attributes #>> '{}')::jsonb ->> 'external_error', 300) as error
+from messages m
+join conversations c on c.id = m.conversation_id
+join inboxes i on i.id = m.inbox_id
+where m.message_type = 1 and m.private = false
+  and i.channel_type = 'Channel::Email'
+  and m.created_at > now() - interval '24 hours'
+order by m.created_at desc limit 30;
+SQL
+
+# 2. Sidekiq's view of the sends
+docker compose logs --since 24h --no-log-prefix sidekiq 2>&1 | grep -E 'Email message [0-9]+ sent|Failed to send Email|SMTP|SendReplyJob' | tail -40
+
+# 3. Netcore reachable from the worker (expect a "220 … ESMTP" line) + inbox SMTP settings (no password)
+docker compose exec sidekiq bash -c 'exec 3<>/dev/tcp/smtp.netcorecloud.net/587 && timeout 5 head -n1 <&3'
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+select id, email, smtp_enabled, smtp_address, smtp_port, smtp_login, smtp_domain,
+       smtp_enable_starttls_auto, smtp_enable_ssl_tls, smtp_openssl_verify_mode, verified_for_sending
+from channel_email;
+SQL
+```
+
+Reading it: `FAILED` + error text → the send never left (auth = inbox SMTP
+login/password; timeout/refused = port 587/DNS; 5xx = From domain not verified at
+Netcore). `sent` + `handed_to_netcore = t` → Netcore accepted it: wait for the
+~4 min hold, check the customer's spam folder, then Netcore's email logs for the
+recipient/time. Nothing in the Sidekiq log → the job never ran: `docker compose ps`,
+then the Retries/Dead tabs at `/monitoring/sidekiq` (super admin).
+
+**8 Oct 2026 result:** the last 30 replies (India.Mail, USA-CA.Email) were all
+`sent` with `source_id` set. Over 7 days only 3 of ~1,500 replies failed, all on
+India.Mail, all `Net::ReadTimeout with #<Socket:(closed)>` = Netcore did not answer
+within the 30 s read timeout (Chatwoot default; `SMTP_OPEN_TIMEOUT` 15 s /
+`SMTP_READ_TIMEOUT` 30 s are env-tunable, used by the inbox SMTP block too). There is
+no automatic retry: the message stays "Failed to send" with a Retry button for 24 h,
+after that the agent must send a new reply. A read timeout after the DATA step can
+mean Netcore actually accepted the mail, so a retry may duplicate it — check the
+Netcore log for the recipient before resending. Everything else reported as "not
+sent" was accepted by Netcore (hold ~4 min, spam, Netcore-side bounce).
+
 ## Questions for the admin
 
 1. Which address per country, and are all of them in the **same** Microsoft

@@ -249,55 +249,67 @@ reviewer"; `avatar_url` = `profilePhotoUrl`; `review_updated_at` = `updateTime`.
 **Blocker:** nothing can be built end-to-end until Google approves API access
 (≤ 14 days) — the Play and App Store pollers do not depend on it.
 
-## 6. The service (`reviews/` in this repo) — what to build
+## 6. The service — `reviews/` in this repo (built 21 Oct 2026)
 
-- Node ESM + `express`, same layout and conventions as `bot/` (`Dockerfile`, `server.js`,
-  one module per store: `play.js`, `apple.js`, `google.js`, plus `chatwoot.js`).
-- Compose service `reviews`, `env_file: .env`, `restart: always`, network alias
-  `reviews.flightsmojo.internal`, port only on localhost for curl. Single-service
-  releases: `docker compose up -d --no-deps reviews`.
-- **Env-gated per store**: a store's poller starts only when all of its variables are
-  set; the webhook route always answers 200 to unknown inboxes so a half-configured
-  deploy is harmless. Proposed names:
-  `REVIEWS_POLL_MINUTES` (default 10),
-  `REVIEWS_BACKFILL_DAYS` (default 7 — Apple and Google list the whole history, so the
-  first run only imports reviews created within this window; Play is one week anyway),
-  `REVIEWS_REPLY_MODE` (`post` | `readonly`, default `readonly`),
-  `REVIEWS_PLAY_PACKAGE`, `REVIEWS_PLAY_SERVICE_ACCOUNT_FILE` (path to a mounted JSON key),
-  `REVIEWS_PLAY_INBOX_IDENTIFIER`, `REVIEWS_PLAY_WEBHOOK_SECRET`,
-  `REVIEWS_APPLE_APP_ID`, `REVIEWS_APPLE_ISSUER_ID`, `REVIEWS_APPLE_KEY_ID`,
-  `REVIEWS_APPLE_KEY_FILE` (.p8 path), `REVIEWS_APPLE_INBOX_IDENTIFIER`, `REVIEWS_APPLE_WEBHOOK_SECRET`,
-  `REVIEWS_GOOGLE_ACCOUNT_ID`, `REVIEWS_GOOGLE_LOCATION_ID`, `REVIEWS_GOOGLE_CLIENT_ID`,
-  `REVIEWS_GOOGLE_CLIENT_SECRET`, `REVIEWS_GOOGLE_REFRESH_TOKEN`,
-  `REVIEWS_GOOGLE_INBOX_IDENTIFIER`, `REVIEWS_GOOGLE_WEBHOOK_SECRET`.
-  Key files are mounted read-only from a host directory that is **not** in the repo.
-- Loop per store: fetch (Play: all pages of the last-week window; Apple/Google: see §4/§5)
-  → for each review `upsertTicket(store, review)`:
-  1. `POST contacts` (idempotent by `source_id`);
-  2. `POST conversations` with the conversation attributes (returns the existing ticket
-     because of the single-conversation lock);
-  3. render the review; if the ticket has no incoming message yet → `POST messages`
-     with it; if the newest incoming message differs → post "Review edited:" + the new
-     rendering and `PATCH contacts` / keep `review_rating` current (conversation
-     attributes can only be set on create through the public API, so the rating in
-     the sidebar stays the original unless the agent-bot token is used for
-     `conversations#custom_attributes`, which is bot-accessible — decide if needed).
-- Webhook route `POST /chatwoot`: verify signature (`secret` per inbox, pick by
-  `conversation.inbox_id` / `inbox.name`), filter `message_created` + `outgoing` +
-  `!private` + `sender.type == "user"`, map `contact_inbox.source_id` → store + review
-  id, enforce the store's length limit, call the reply API, 200 on success, 4xx/5xx on
-  failure (+ private note with the store error). `REVIEWS_REPLY_MODE=readonly` → 200 and
-  a private note "replies are not posted to <store>; reply in the console".
-- Message body (proposal, plain text):
+Node 22 ESM + `express`, same layout as `bot/`. Compose service `reviews`
+(alias `reviews.flightsmojo.internal`, port 3003 on localhost only, `env_file: .env`),
+single-service releases with `docker compose up -d --no-deps reviews`.
+
+| File | Job |
+|---|---|
+| `server.js` | env → stores, express (`GET /health`, `POST /chatwoot`), pollers |
+| `bridge.js` | `pollStore()` (store → tickets) and `handleReply()` (webhook → store), no env/express |
+| `sync.js` | one review → one ticket: contact, conversation, compare, post (§2.1) |
+| `render.js` | review → deterministic ticket text, `source_id`, attributes |
+| `chatwoot.js` | public client API, webhook signature check, private notes (bot token) |
+| `play.js`, `apple.js`, `google.js` | list + normalise + reply per store, with the limits from §3–5 |
+| `oauth.js` | service-account JWT, refresh-token grant, Apple ES256 JWT (Node crypto only) |
+| `http.js`, `limits.js` | fetch with `res.ok` check; reply length errors |
+
+Tests: `node --test tests/reviews/*.test.mjs` (28, no deps; stores are exercised
+through a stubbed `fetch`). `tests/reviews/mockstore.mjs` is a stand-in for the
+three store APIs for the preview end-to-end run (`REVIEWS_*_API_BASE` and
+`REVIEWS_GOOGLE_TOKEN_URL` point the service at it; nothing else changes).
+
+**Env (all in `.env`, see `.env.example`)** — every store is off until all of its
+variables are set; the webhook route answers 200 to unknown inboxes.
+`REVIEWS_POLL_MINUTES` (10), `REVIEWS_BACKFILL_DAYS` (7), `REVIEWS_REPLY_MODE`
+(`readonly` | `post`, default readonly), `REVIEWS_MAX_RATING` (5), `REVIEWS_IMPORT_REPLIED` (false);
+`REVIEWS_PLAY_PACKAGE`, `REVIEWS_PLAY_SERVICE_ACCOUNT_B64`, `REVIEWS_PLAY_INBOX_IDENTIFIER`, `REVIEWS_PLAY_WEBHOOK_SECRET`;
+`REVIEWS_APPLE_APP_ID`, `REVIEWS_APPLE_ISSUER_ID`, `REVIEWS_APPLE_KEY_ID`, `REVIEWS_APPLE_KEY_B64`,
+`REVIEWS_APPLE_INBOX_IDENTIFIER`, `REVIEWS_APPLE_WEBHOOK_SECRET`, `REVIEWS_APPLE_REPLY_MAX_CHARS` (optional);
+`REVIEWS_GOOGLE_ACCOUNT_ID`, `REVIEWS_GOOGLE_LOCATION_ID`, `REVIEWS_GOOGLE_CLIENT_ID`, `REVIEWS_GOOGLE_CLIENT_SECRET`,
+`REVIEWS_GOOGLE_REFRESH_TOKEN`, `REVIEWS_GOOGLE_INBOX_IDENTIFIER`, `REVIEWS_GOOGLE_WEBHOOK_SECRET`.
+Keys are base64 one-liners in `.env` (`base64 < file | tr -d '\n'`), like every other secret here — no extra mounts.
+`CHATWOOT_BOT_TOKEN` + `CHATWOOT_ACCOUNT_ID` (already set for the bot) enable the private notes.
+
+**Behaviour**
+- Poll per store at boot and every `REVIEWS_POLL_MINUTES`; a poll never overlaps itself.
+  Filters: rating ≤ `REVIEWS_MAX_RATING`, created/updated within `REVIEWS_BACKFILL_DAYS`.
+- `syncReview`: `POST contacts` (idempotent) → `GET conversations` (newest wins; `POST` only if none)
+  → compare the rendered review with the newest incoming message → post it, post
+  "Review edited:" + it, or nothing. A review that already has a store reply and no
+  ticket is skipped (`REVIEWS_IMPORT_REPLIED=true` to import anyway).
+- Ticket text:
   ```
-  ★★☆☆☆  2/5 · Google Play · v3.4.1 · Android 14 · en
+  ★★☆☆☆ 2/5 · Google Play · v3.4.1 · en
+
   <title>
   <body>
   ```
-- Logging like the bot: one line per poll (`play: 12 reviews, 2 new, 1 edited`), one
-  per reply with the store's HTTP status; never log review text at info level.
+  Conversation attributes `review_store`, `review_rating`, `review_id` (exact store id),
+  `review_updated_at`, `review_link`; contact attributes `review_app_version`, `review_locale`, `review_device`.
+- Webhook `POST /chatwoot`: store from `conversation.contact_inbox.source_id` prefix;
+  signature checked with that inbox's secret (401 otherwise); acts only on
+  `message_created` + `outgoing` + not private + `sender.type == "user"`.
+  `readonly` (or no secret) → 200 + private note "Not posted to <store>…".
+  `post` → store reply API; 200 on success; **422** when over the store's limit
+  (350 chars Play, 4096 bytes Google, optional Apple), **502** on a store error — both
+  mark the agent's message *failed* in the dashboard and leave a private note with the reason.
+- Logs: one line per poll (`play: 12 listed, 3 in scope, 1 new, 0 edited, …`), one per
+  reply, never the review text.
 
-## 7. Checklist before coding starts
+## 7. Checklist before go-live
 
 Credentials (user creates, never pasted in chat, land in the server `.env` / key dir):
 - [ ] Play: Cloud project + service account JSON; invited in Play Console with *Reply to reviews*.
@@ -312,8 +324,31 @@ Dashboard (admin):
 - [ ] Decision: `REVIEWS_REPLY_MODE` post vs readonly; all ratings vs ≤ 3 only.
 - [ ] Decision: Booking-ID-required rule exemption for the review inboxes.
 
-Verification plan (preview stack): create the inboxes on the preview, run the service
-against the preview with `REVIEWS_REPLY_MODE=readonly`, replay saved store payloads
-(fixtures) → check tickets, edits, attributes, Reports channel dropdown; then one
-real reply per store from the preview with a throwaway text, and delete/edit it in
-the console.
+Verification: unit suite green (28). Preview end-to-end with the mock store: see the
+"Preview run" note at the end of this file once done. Before go-live, one real reply
+per store with a throwaway text from the preview, then edit or delete it in the console.
+
+---
+
+## Preview run — 21 Oct 2026 (fm-ui-preview, mock store)
+
+Setup: `tests/reviews/mockstore.mjs` and the bridge added to the preview compose on
+its isolated network (`SAFE_FETCH_ALLOW_PRIVATE_NETWORK=true` on rails + sidekiq, as
+on prod); three API inboxes (13 Play, 14 App Store, 15 Google) created through the
+API with *Lock to single conversation* and `webhook_url` set; the eight attribute
+definitions created; `REVIEWS_REPLY_MODE=post`, poll every minute, throwaway keys.
+
+| Check | Result |
+|---|---|
+| First poll | Play 2 new, Google 2 new (one rating-only → "(rating only, no written review)", contact "Anonymous reviewer"), App Store 1 new |
+| Ticket content | header + title + body as in §6; conversation attributes `review_store/rating/id/updated_at/link`, contact attributes `review_app_version/locale/device`; contact identifier `play:gp:AOqpTOH_one` |
+| Agent reply (Play, App Store, Google) | each delivered through the inbox webhook and recorded by the mock store with the exact review id; message stays *sent* |
+| 395-character reply on Play | bridge answers 422 → message shown **failed** with "422 Google Play allows 350 characters; this reply has 395" + private note with the same text |
+| Review edited in the store | next poll posts "Review edited:" + the new rendering on the same ticket; no new ticket |
+| Unchanged reviews | later polls: 0 new, 0 edited (cache + text compare) |
+| Dashboard | ticket opens under "Play Store reviews" with the review text, the failed reply and the private note (screenshot in the session scratchpad) |
+
+Not exercised on the preview: real store credentials (the mock accepts any signed
+assertion), `readonly` mode (unit-tested), Pub/Sub for Google. Gotchas met: the
+preview compose must be run as project `fm-ui-preview` (`-p`), otherwise a new empty
+`pgdata` volume is created; the mock store must accept Apple's own JWT as the bearer.

@@ -910,7 +910,7 @@ the verified store API facts and the go-live checklist: **`docs/store-reviews-to
 
 ## 18. IROP mail triage — `triage/server.js` (hub repo, 22 Oct 2026)
 
-Supplier mail for `agency@flightsmojo.in` (~3,000 a day) is classified **before** Chatwoot
+Supplier mail for `agency@flightsmojo.in` (~1,700 a day (measured 15–22 Oct 2026: 1,400–2,000 inbound per day, seven days a week, about half of it auto-archived on arrival)) is classified **before** Chatwoot
 sees it; only IROP notices (and unsure ones, during the shadow run) become tickets in one
 email inbox, prioritised by travel date and handed to the IROP team. Nothing in the fork
 changes. Design, the verified facts, the preview run and the go-live steps:
@@ -936,3 +936,7 @@ changes. Design, the verified facts, the preview run and the go-live steps:
   sticky assignment is account-wide by contact, harmless in phase 1 only because nobody
   replies to suppliers from this inbox (FM-28 before phase 2); `grep -r` skips the symlinked
   nginx site files on the box.
+
+## Gotchas found while testing
+
+- **`messages.content_attributes` is a JSON *string* in the database** (upstream behaviour, 4.18 and 4.19 alike): the `json` column holds the serialised hash as a scalar, so `content_attributes->'email'` returns NULL in SQL even though the API and the dashboard see the hash. For read-only diagnostics use `(content_attributes #>> '{}')::json -> 'email'`, or search `content_attributes::text`. `conversations.custom_attributes` / `additional_attributes` are normal objects. (Found 22 Oct 2026 while checking 300 real agency mails on the fm4 candidate.)

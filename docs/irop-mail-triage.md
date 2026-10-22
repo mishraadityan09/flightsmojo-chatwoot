@@ -66,7 +66,7 @@ change its price. Offboarding erases Emailgistics-side history; the mail itself 
 
 **What phase 1 replaces:** the rule-and-assignment layer *for IROP mail only*. During the shadow
 period Emailgistics keeps running on the whole mailbox; after cut-over the mailbox remains the
-archive for all 3,000 a day, and Chatwoot holds the IROP work. Customer mail that happens to land
+archive for all ~1,700 a day (measured 15–22 Oct 2026: 1,400–2,000 inbound per day, seven days a week, about half of it auto-archived on arrival), and Chatwoot holds the IROP work. Customer mail that happens to land
 in `agency@` is not IROP and stays with the mailbox (routing it into a country inbox is a later
 phase; the X-Original-To mechanism in §3.1 makes that cheap).
 
@@ -199,7 +199,7 @@ volume shared by rails and sidekiq — without the shared volume `RoutingJob` di
 `RoutingJob` ≈ 0.8 s for the heavy mail; event jobs 25–260 ms each. Extrapolated with a mix of
 30% text, 50% HTML, 20% with a PDF:
 
-| | Ingest everything (3,000/day) | **Phase 1: triage first (~800/day)** |
+| | Ingest everything (~1,700/day measured, peaks 2,000) | **Phase 1: triage first (IROP share to be measured with the real model; ~800/day was the estimate at 3,000/day)** |
 |---|---|---|
 | Postgres growth | 1.5 GB / month | 0.4–0.5 GB / month |
 | Attachments, permanent | 2.8 GB / month | 0.75 GB / month |
@@ -392,6 +392,8 @@ re-bump work list. The bodies of mails are never written anywhere by the service
 
 ### 5.6 Throughput and concurrency
 
+*Measured volumes and the growth headroom are in §6a; the figures below describe the mechanism.*
+
 Postfix delivers the `triage` transport with `triage_destination_concurrency_limit`
 (DECISION 6, proposal 4; the existing `chatwoot` transport uses 2). Each delivery is one
 synchronous `/ingest` taking ~1–5 s (model) + ~0.3 s (relay), so 4 in parallel ≈ 50–200 mails a
@@ -496,6 +498,24 @@ Daily EBS snapshot policy (14-day retention) and a disk-space alarm (both pendin
 Sep 2026 disk incident); the afternoon memory check; a separate OpenAI key with a ~$100/month cap
 and a top-up alert (the org ran dry once in Sep 2026 — quota exhaustion fails open here, but
 blinds the classifier).
+
+## 6a. Capacity and growth (measured 22 Oct 2026)
+
+Volumes go up: a bad-weather week, a new airline, or a new market can double the inflow overnight, so every number below is a planning floor, not a ceiling.
+
+| Figure | Value |
+|---|---|
+| Measured inbound, 15–21 Oct 2026 | 1,400–2,000 a day, seven days a week, ≈70 an hour averaged, daytime peaks 2–3× |
+| Planning baseline | 2,000 a day |
+| Design target (3×) | 6,000 a day, bursts of 1,000 an hour |
+| Triage service, mock model | 300 mails in 8 s (37/s) |
+| Triage service, real model, at the planned Postfix concurrency of 4 and 1–5 s a call (§5.6) | 50–200 a minute, 3,000–12,000 an hour; a 1,000-mail burst drains in 5–20 minutes while Postfix holds the rest |
+| Chatwoot ingest incl. attachments (laptop, candidate image) | ≈2.7/s, ≈10,000 an hour; only the IROP share reaches it |
+| Postfix in front | queues what the service cannot take (503 "busy" / 500), retries; nothing is dropped |
+
+Where the real limits are: the model provider's rate limit and the budget cap on the classifier key. Set the monthly cap at **3× the expected spend** (2,000 mails ≈ 2 M input tokens a day at the measured ~900 + 120 tokens per mail) with an **alert at 50%**. If the cap trips or the provider fails, the service does not stop mail: a classifier failure becomes "unclassified" and the mail is still relayed to the desk's queue, so growth beyond the cap degrades to "more for the desk to sort", never to lost mail.
+
+What to watch after go-live: the `/health` counters (`seen`, `relayed`, `skipped`, `failed`, `inFlight`) once a day; `failed > 0` or `inFlight` sitting at the maximum means the provider or Chatwoot is slow and Postfix is queueing; the provider dashboard for spend against the cap. If bursts keep queueing, raise the Postfix transport concurrency and `TRIAGE_MAX_IN_FLIGHT` together (the lower of the two is the real limit); the service is stateless apart from the ledger file, so it can also simply be given more CPU.
 
 ## 7. Testing, eval and go-live
 
